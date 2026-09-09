@@ -1,0 +1,154 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Sortie — AI Recycling Assistant</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Inter:wght@400;500;600;700&display=swap"
+  rel="stylesheet"
+/>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}" />
+
+<div class="app" data-state="loading">
+
+  <!-- Ambient blobs that tint to the detected category -->
+  <div class="atmosphere" aria-hidden="true">
+    <span class="blob blob-a"></span>
+    <span class="blob blob-b"></span>
+  </div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v6M12 21v-6" />
+          <path d="M4 8l4-2 4 2 4-2 4 2" />
+          <circle cx="12" cy="12" r="2.6" />
+        </svg>
+      </span>
+      <span class="brand-name">Sortie</span>
+    </div>
+    <div class="status" title="Live camera status">
+      <span class="status-dot"></span>
+      <span class="status-label" data-status-label>Waking up…</span>
+    </div>
+  </header>
+
+  <main class="stage">
+    <div class="viewport" data-viewport>
+      <video class="feed" data-feed autoplay muted playsinline></video>
+
+      <!-- scanning sweep -->
+      <div class="scanline" aria-hidden="true"></div>
+
+      <!-- red box tracking whatever is moving in frame -->
+      <div class="motion-box" data-motion-box aria-hidden="true" hidden></div>
+
+      <!-- idle pulse ring -->
+      <div class="reticle" aria-hidden="true">
+        <span></span><span></span>
+      </div>
+
+      <!-- camera-denied / error panel -->
+      <div class="camera-error" data-camera-error hidden>
+        <p class="camera-error-title" data-error-title>Camera is off</p>
+        <p class="camera-error-msg" data-error-msg>
+          Sortie needs your camera to see items. Allow access, then try again.
+        </p>
+        <button class="retry" type="button" data-retry>Turn on camera</button>
+      </div>
+
+      <canvas class="grabber" data-grabber hidden></canvas>
+    </div>
+
+    <p class="prompt" data-prompt>Show items here:</p>
+    <p class="cheer" data-cheer></p>
+  </main>
+
+  <!-- Verdict — floats in the centre of the screen once an item is sorted -->
+  <div class="verdict" data-verdict aria-live="polite">
+    <svg class="ring" viewBox="0 0 120 120" aria-hidden="true">
+      <circle class="ring-track" cx="60" cy="60" r="52" />
+      <circle class="ring-fill" data-ring cx="60" cy="60" r="52" />
+    </svg>
+    <div class="verdict-body">
+      <span class="verdict-icon" data-verdict-icon></span>
+      <span class="verdict-name" data-verdict-name>Plastic</span>
+      <span class="verdict-conf" data-verdict-conf>93% sure</span>
+    </div>
+  </div>
+
+  <!-- Arrow that points down at the matching bin -->
+  <div class="bin-arrow" data-bin-arrow aria-hidden="true">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"
+         stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3v16" />
+      <path d="M5 13l7 7 7-7" />
+    </svg>
+  </div>
+
+  <!-- The bins: the tactile heart of the kiosk -->
+  <section class="bins" aria-label="Sorting bins">
+    <button class="bin" type="button" data-bin="glass" style="--bin: var(--glass)">
+      <span class="lid" aria-hidden="true"></span>
+      <span class="bin-body">
+        <span class="bin-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 2h6M10 2v3.5c0 .8-.3 1.4-.8 2L8 9c-.6.7-1 1.6-1 2.5V20a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2v-8.5c0-.9-.4-1.8-1-2.5l-1.2-1.5c-.5-.6-.8-1.2-.8-2V2" />
+          </svg>
+        </span>
+        <span class="bin-name">Glass</span>
+      </span>
+    </button>
+
+    <button class="bin" type="button" data-bin="paper" style="--bin: var(--paper)">
+      <span class="lid" aria-hidden="true"></span>
+      <span class="bin-body">
+        <span class="bin-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 3h9l3 3v15a0 0 0 0 1 0 0H6a0 0 0 0 1 0 0V3z" />
+            <path d="M14 3v4h4M9 12h6M9 16h6" />
+          </svg>
+        </span>
+        <span class="bin-name">Paper</span>
+      </span>
+    </button>
+
+    <button class="bin" type="button" data-bin="plastic" style="--bin: var(--plastic)">
+      <span class="lid" aria-hidden="true"></span>
+      <span class="bin-body">
+        <span class="bin-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10 2h4v2l1 1v2H9V5l1-1V2z" />
+            <path d="M8 7h8l-.6 12.5a2 2 0 0 1-2 1.5H10.6a2 2 0 0 1-2-1.5L8 7z" />
+            <path d="M9 12h6" />
+          </svg>
+        </span>
+        <span class="bin-name">Plastic</span>
+      </span>
+    </button>
+
+    <button class="bin" type="button" data-bin="waste" style="--bin: var(--waste)">
+      <span class="lid" aria-hidden="true"></span>
+      <span class="bin-body">
+        <span class="bin-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 7h16M9 7V4h6v3M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13" />
+            <path d="M10 11v7M14 11v7" />
+          </svg>
+        </span>
+        <span class="bin-name">Waste</span>
+      </span>
+    </button>
+  </section>
+
+  <canvas class="confetti" data-confetti aria-hidden="true"></canvas>
+</div>
+
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
