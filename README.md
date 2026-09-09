@@ -1,8 +1,7 @@
 # Sortie — AI Recycling Assistant
 
-A local web app that watches your webcam and tells you which bin an item belongs
-in — **glass, paper, plastic, or waste** — with a friendly, animated kiosk UI
-inspired by the Oscar Sort bin.
+A local web app that watches webcam and tells you which bin an item belongs
+in — **glass, paper, plastic, or waste** Made for kiosk use
 
 The UI is fully built and works right now in **mock mode** (fake predictions),
 so you can see everything before your model is ready. When your `.tflite` model
