@@ -38,7 +38,8 @@
 
   <main class="stage">
     <div class="viewport" data-viewport>
-      <video class="feed" data-feed autoplay muted playsinline></video>
+      <video class="camera-source" data-feed autoplay muted playsinline hidden aria-hidden="true"></video>
+      <canvas class="feed" data-private-feed aria-label="Camera preview with people blurred"></canvas>
 
       <!-- scanning sweep -->
       <div class="scanline" aria-hidden="true"></div>
@@ -151,4 +152,4 @@
   <canvas class="confetti" data-confetti aria-hidden="true"></canvas>
 </div>
 
-<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+<script type="module" src="{{ url_for('static', filename='js/app.js') }}"></script>

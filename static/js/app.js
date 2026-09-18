@@ -3,6 +3,8 @@
    Webcam → sample frames → POST /predict → state machine → verdict animation
    ========================================================================= */
 
+import { PrivacyCamera } from "./privacy.mjs";
+
 (() => {
   "use strict";
 
@@ -29,6 +31,7 @@
   // ---- Elements ---------------------------------------------------------
   const app = document.querySelector(".app");
   const feed = document.querySelector("[data-feed]");
+  const privateFeed = document.querySelector("[data-private-feed]");
   const grabber = document.querySelector("[data-grabber]");
   const viewport = document.querySelector("[data-viewport]");
   const verdictEl = document.querySelector("[data-verdict]");
@@ -70,13 +73,28 @@
 
   let state = "loading";
   let stream = null;
-  let motionTimer = null;
+  let lastMotionAt = 0;
   let inFlight = false;
   let holding = false; // true while a verdict is on screen
   let candidate = null; // { category, count } for the stability check
   let prevGray = null; // greyscale snapshot of the previous frame, for the diff
   let motionCanvas = null; // small offscreen canvas the diff is computed on
   let lastPredictAt = 0; // timestamp of the last frame handed to the model
+  let cameraSession = 0;
+  let predictionRequest = null;
+  let resultTimer = null;
+  let resumeCamera = false;
+  const privacy = new PrivacyCamera(feed, privateFeed, {
+    onFrame() {
+      if (state === "loading") setState("idle");
+      // Privacy rendering continues during verdicts; only classification pauses.
+      if (Date.now() - lastMotionAt >= MOTION_INTERVAL) {
+        lastMotionAt = Date.now();
+        tick();
+      }
+    },
+    onError: showError,
+  });
 
   function setState(next) {
     state = next;
@@ -93,10 +111,12 @@
 
   // ---- Camera -----------------------------------------------------------
   async function startCamera() {
+    stopCamera();
+    const session = cameraSession;
     hideError();
     setState("loading");
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
+      const cameraStream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: "user",
           width: { ideal: 1280 },
@@ -106,29 +126,53 @@
         },
         audio: false,
       });
+      if (session !== cameraSession) {
+        cameraStream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      stream = cameraStream;
+      stream.getVideoTracks().forEach((track) => track.addEventListener("ended", () => {
+        if (session === cameraSession) showError(new Error("Camera disconnected"));
+      }));
       feed.srcObject = stream;
       await feed.play();
-      setState("idle");
-      startLoop();
+      if (session !== cameraSession) return;
+      statusLabel.textContent = "Starting privacy blur…";
+      privacy.start();
     } catch (err) {
-      showError(err);
+      if (session === cameraSession) showError(err);
     }
   }
 
   function stopCamera() {
+    cameraSession++;
+    privacy.stop();
+    predictionRequest?.abort();
+    predictionRequest = null;
+    inFlight = false;
+    clearTimeout(resultTimer);
+    holding = false;
+    candidate = null;
+    lastPredictAt = lastMotionAt = 0;
+    bins.forEach((el) => el.classList.remove("is-match"));
+    cheerEl.textContent = "";
     if (stream) stream.getTracks().forEach((t) => t.stop());
     stream = null;
+    feed.srcObject = null;
     hideMotionBox();
     prevGray = null;
   }
 
   function showError(err) {
-    clearInterval(motionTimer);
     stopCamera();
     setState("error");
     const denied = err && (err.name === "NotAllowedError" || err.name === "SecurityError");
     const missing = err && (err.name === "NotFoundError" || err.name === "OverconstrainedError");
-    if (denied) {
+    if (err?.name === "PrivacyError") {
+      errorTitle.textContent = "Privacy blur unavailable";
+      errorMsg.textContent =
+        "The camera is paused because people could not be blurred. Try again using a current browser.";
+    } else if (denied) {
       errorTitle.textContent = "Camera access blocked";
       errorMsg.textContent =
         "Sortie needs your camera to see items. Allow it in your browser, then try again.";
@@ -148,13 +192,8 @@
 
   // ---- Capture loop -----------------------------------------------------
   // The loop watches for motion; the model only runs while something moves.
-  function startLoop() {
-    clearInterval(motionTimer);
-    motionTimer = setInterval(tick, MOTION_INTERVAL);
-  }
-
   function tick() {
-    if (holding || !stream) return;
+    if (holding || !stream || !privacy.available || document.hidden) return;
 
     const motion = detectMotion();
     if (motion) {
@@ -179,8 +218,8 @@
   // Returns { box } (normalised 0..1, in raw camera coords) when enough of the
   // frame changed, otherwise null.
   function detectMotion() {
-    const vw = feed.videoWidth;
-    const vh = feed.videoHeight;
+    const vw = privateFeed.width;
+    const vh = privateFeed.height;
     if (!vw || !vh) return null;
 
     if (!motionCanvas) motionCanvas = document.createElement("canvas");
@@ -190,7 +229,7 @@
     motionCanvas.height = gh;
 
     const ctx = motionCanvas.getContext("2d", { willReadFrequently: true });
-    ctx.drawImage(feed, 0, 0, gw, gh);
+    ctx.drawImage(privateFeed, 0, 0, gw, gh);
     const { data } = ctx.getImageData(0, 0, gw, gh);
 
     const gray = new Uint8ClampedArray(gw * gh);
@@ -245,8 +284,8 @@
   function drawMotionBox(box) {
     const cw = viewport.clientWidth;
     const ch = viewport.clientHeight;
-    const vw = feed.videoWidth;
-    const vh = feed.videoHeight;
+    const vw = privateFeed.width;
+    const vh = privateFeed.height;
     if (!vw || !vh || !cw || !ch) return;
 
     const scale = Math.max(cw / vw, ch / vh); // object-fit: cover
@@ -274,18 +313,21 @@
   }
 
   function grabFrame() {
-    const vw = feed.videoWidth;
-    const vh = feed.videoHeight;
-    if (!vw || !vh) return null;
+    const vw = privateFeed.width;
+    const vh = privateFeed.height;
+    if (!privacy.available || !vw || !vh) return null;
     const scale = FRAME_WIDTH / vw;
     grabber.width = FRAME_WIDTH;
     grabber.height = Math.round(vh * scale);
     const ctx = grabber.getContext("2d");
-    ctx.drawImage(feed, 0, 0, grabber.width, grabber.height);
+    ctx.drawImage(privateFeed, 0, 0, grabber.width, grabber.height);
     return grabber.toDataURL("image/jpeg", 0.7);
   }
 
   async function sendFrame(dataUrl) {
+    const session = cameraSession;
+    const controller = new AbortController();
+    predictionRequest = controller;
     inFlight = true;
     if (state === "idle") setState("scanning");
     try {
@@ -293,9 +335,10 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image: dataUrl }),
+        signal: controller.signal,
       });
       const data = await res.json();
-      if (res.ok && data.category) {
+      if (session === cameraSession && res.ok && data.category) {
         handlePrediction(data);
       }
       // Non-OK responses (bad frame, model not wired) are ignored so the loop
@@ -303,7 +346,10 @@
     } catch (_) {
       // network hiccup — skip this frame, try again next tick
     } finally {
-      inFlight = false;
+      if (session === cameraSession) {
+        inFlight = false;
+        predictionRequest = null;
+      }
     }
   }
 
@@ -360,7 +406,7 @@
       burstConfetti(color);
     }
 
-    setTimeout(endResult, RESULT_HOLD);
+    resultTimer = setTimeout(endResult, RESULT_HOLD);
   }
 
   function endResult() {
@@ -481,14 +527,18 @@
   // ---- Lifecycle --------------------------------------------------------
   retryBtn.addEventListener("click", startCamera);
   document.addEventListener("visibilitychange", () => {
-    // pause the loop when the tab is hidden, resume when it returns
+    // Release raw frames and discard all pending work when leaving the tab.
     if (document.hidden) {
-      clearInterval(motionTimer);
-      hideMotionBox();
-      prevGray = null;
-    } else if (stream && !holding) {
-      startLoop();
+      resumeCamera = Boolean(stream) || state === "loading";
+      stopCamera();
+    } else if (resumeCamera) {
+      resumeCamera = false;
+      startCamera();
     }
+  });
+  window.addEventListener("pagehide", stopCamera);
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted && !document.hidden) startCamera();
   });
 
   startCamera();

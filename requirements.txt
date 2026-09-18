@@ -2,8 +2,5 @@ Flask>=3.0
 Pillow>=10.0
 numpy>=1.24
 
-# --- For your model (uncomment ONE when you wire in your .tflite) ---
-# The lightweight runtime (recommended for just running a .tflite model):
-# tflite-runtime>=2.14
-# ...or the full TensorFlow package (also provides tf.lite.Interpreter):
-# tensorflow>=2.15
+# TFLite runtime (Google's LiteRT — the maintained successor to tflite-runtime).
+ai-edge-litert>=1.0
