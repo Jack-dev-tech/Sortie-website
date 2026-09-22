@@ -168,8 +168,6 @@ body {
 }
 .app[data-state="result"] .viewport { outline-color: var(--accent); }
 
-.camera-source { display: none !important; }
-
 .feed {
   display: block;
   width: 100%;

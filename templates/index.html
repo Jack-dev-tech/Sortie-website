@@ -38,8 +38,7 @@
 
   <main class="stage">
     <div class="viewport" data-viewport>
-      <video class="camera-source" data-feed autoplay muted playsinline hidden aria-hidden="true"></video>
-      <canvas class="feed" data-private-feed aria-label="Camera preview with people blurred"></canvas>
+      <video class="feed" data-feed autoplay muted playsinline aria-label="Camera preview"></video>
 
       <!-- scanning sweep -->
       <div class="scanline" aria-hidden="true"></div>
@@ -165,7 +164,7 @@
       <div><dt>Uploaded</dt><dd data-count-uploaded>—</dd></div>
       <div><dt>Pending</dt><dd data-count-pending>—</dd></div>
     </dl>
-    <p class="training-note">Motion triggers captures, including other movement. Stationary items are not repeatedly captured. People stay blurred. Images are sent to Roboflow for manual labeling only.</p>
+    <p class="training-note">Motion triggers captures, including other movement. Stationary items are not repeatedly captured. Images are sent to Roboflow for manual labeling only.</p>
     <p class="training-empty" data-training-empty>No captures this visit. Move an item in view to begin.</p>
     <div class="training-recent" data-training-recent aria-label="Recent captures this visit"></div>
   </section>

@@ -1,4 +1,4 @@
-// Receives only privacy-processed frames. Never runs inference.
+// Captures webcam frames for manual labeling. Never runs inference.
 export class TrainingCapture {
   constructor() {
     this.active = false;
@@ -83,18 +83,20 @@ export class TrainingCapture {
       (s?.full ? 'Queue full: 500 images waiting. Capture resumes when uploads make room.' : null) ||
       (s?.failed ? s.error : null) ||
       (document.hidden ? 'Capture paused while this tab is hidden.' : null) ||
-      (!this.ready ? 'Capture paused until the camera and privacy blur are ready.' : null) ||
+      (!this.ready ? 'Capture paused until the camera is ready.' : null) ||
       (this.paused ? 'Capture paused. Saved images continue uploading.' : null) ||
       (this.pending ? 'Saving capture to the local queue…' : null) ||
       s?.error || (s ? 'Watching for motion · at most one image every 3 seconds' : 'Checking Roboflow setup…');
   }
 
-  tick(motion, canvas, ready) {
+  tick(motion, capture, ready) {
     if (this.ready !== ready) { this.ready = ready; this.render(); }
     if (!this.active || !ready || document.hidden || this.paused || !this.status?.can_capture ||
         this.pending || !motion || Date.now() - this.lastCapture < 3000) return;
+    const image = capture();
+    if (!image) return;
     this.lastCapture = Date.now();
-    this.pending = { id: crypto.randomUUID(), session: this.session, image: canvas.toDataURL('image/jpeg', 0.95) };
+    this.pending = { id: crypto.randomUUID(), session: this.session, image };
     this.submit();
   }
 
@@ -120,7 +122,7 @@ export class TrainingCapture {
       this.localError = null;
       const img = document.createElement('img');
       img.src = capture.image;
-      img.alt = 'Privacy-processed capture saved for manual labeling';
+      img.alt = 'Capture saved for manual labeling';
       const recent = document.querySelector('[data-training-recent]');
       document.querySelector('[data-training-empty]').hidden = true;
       recent.prepend(img);

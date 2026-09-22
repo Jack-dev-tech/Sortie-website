@@ -21,73 +21,6 @@ Then open **http://localhost:5000** and allow camera access when prompted.
 > Browsers only allow the camera on `localhost` or over HTTPS. `localhost` is
 > fine — you don't need a certificate for local use.
 
-## Camera privacy
-
-People are automatically blurred in the preview **and** in every image the UI
-submits to `/predict`, except for detected hands and their immediate surroundings.
-Each hand keeps a clear bounding box padded by 30% on each side so nearby held
-items remain visible. Faces, hair, clothing, and the rest of the body stay blurred;
-detected face regions take priority even when a hand overlaps them. If a hand is
-not detected, the body blur remains in effect. Detection runs in
-a browser worker using locally served MediaPipe models. Camera images are never
-sent to an external detection service. The existing Google Fonts links are
-unrelated to camera processing.
-
-The raw video stays hidden. Each frame is captured at up to 640 pixels wide,
-detected, and blurred before it reaches the visible canvas. Motion detection
-and the 320-pixel classifier JPEG both use that processed canvas. Only one frame
-is processed at a time, so slower devices show fewer frames rather than applying
-an old mask to a new image. Privacy processing continues during sorting results.
-Loading, errors, and unsupported browsers leave the preview blank and prevent
-submissions. Switching tabs stops the camera; returning starts a fresh session.
-
-Use a current browser with Web Workers, WebAssembly, OffscreenCanvas, and
-createImageBitmap support. The model and runtime assets are included under
-`static/models/privacy` and `static/vendor/mediapipe`; no extra Python packages,
-API keys, or runtime downloads from a CDN are required. Their versions, source
-URLs, and SHA-256 hashes are recorded in `static/models/privacy/manifest.json`.
-
-Automatic detection is best effort, **not a guarantee of anonymization**.
-Small, distant, occluded, or isolated body parts can be missed. Items held close
-to a person may still be blurred outside the padded hand areas, reducing
-classification accuracy. The hand exceptions can also reveal nearby body pixels.
-Validate with
-the actual kiosk camera, distance, lighting, and users before relying on this
-for privacy. The `/predict` API itself remains an image classifier; external
-clients calling it directly are responsible for processing their own images.
-
-### Privacy checks
-
-Run the focused mask, synchronization, and failure-handling tests with Node 20+:
-
-```bash
-node --test tests/privacy.test.mjs
-```
-
-Optional Chrome integration checks use public MediaPipe sample photos and a
-simulated camera, without accessing your webcam. With Google Chrome installed,
-start a separate mock server:
-
-```bash
-SORTIE_MOCK=1 venv/bin/python -m flask --app app run --port 5055
-```
-
-Then, in another terminal:
-
-```bash
-npm install --prefix /tmp/sortie-browser-check playwright@1.63.0
-curl -fL https://storage.googleapis.com/mediapipe-assets/pose.jpg -o /tmp/sortie-privacy-pose.jpg
-curl -fL https://storage.googleapis.com/mediapipe-assets/right_hands.jpg -o /tmp/sortie-privacy-hands.jpg
-PLAYWRIGHT_MODULE=/tmp/sortie-browser-check/node_modules/playwright/index.mjs node tests/privacy-browser.mjs
-```
-
-The browser checks verify real model inference, clear hands, person/background separation,
-submitted JPEGs matching the preview, continuous blurring during results,
-failure handling, camera denial, retry, and tab pause/resume. They save the
-processed sample to `/tmp/sortie-privacy-person.png`. `SORTIE_TEST_URL` and
-`SORTIE_TEST_PHOTO` override the server URL and pose sample path; `SORTIE_TEST_HANDS`
-overrides the hand sample path (pixel comparisons assume these same sample photos).
-
 ## Plug in your model
 
 Everything model-related lives in **`model.py`**. It works with any `.tflite`
@@ -160,7 +93,7 @@ than classifiers, so lower that while testing a detection model.
 ## How it fits together
 
 ```
-Browser (webcam → privacy blur) ──POST /predict {image}──▶ Flask ──▶ model.classify()
+Browser (webcam) ──────────────POST /predict {image}──▶ Flask ──▶ model.classify()
       ▲                                                                    │
       └──────────  {category, confidence}  ◀───────────────────────────────┘
       │
@@ -205,18 +138,18 @@ or train/deploy a model. Every reload starts in Normal.
    python app.py
    ```
 
-3. Select Training. Once camera privacy processing is ready, movement triggers at
+3. Select Training. Once the camera is ready, movement triggers at
    most one capture every three seconds. Other movement can trigger captures;
    stationary items are not repeatedly captured. **Pause capture** stops new captures.
-   Leaving the tab or losing camera/privacy processing also pauses capture.
+   Leaving the tab or losing the camera also pauses capture.
 4. Choose **Open Roboflow**, find the `sortie-<session UUID>` upload batch, and open
    its images in Annotate. Draw bounding boxes and assign the four classes manually.
    Check the first uploaded image is unannotated and can be labeled before collecting
    a larger session. Roboflow may recognize an existing duplicate image; existing
    annotations on that image are not removed.
 
-Captures contain the complete processed frame at up to 640 pixels wide, encoded as
-95%-quality JPEG. They preserve the existing people blur and hand handling. Thumbnails
+Captures contain the complete camera frame at up to 640 pixels wide, encoded as
+95%-quality JPEG. Thumbnails
 show the six most recently saved images from this page visit. Counts include all
 captures recorded in this local queue, across sessions; pending includes failed uploads.
 
@@ -247,11 +180,10 @@ Run the queue/API checks without Roboflow credentials:
 
 ```sh
 python -m unittest discover -s tests -p 'test_training.py'
-node --test tests/privacy.test.mjs
 PLAYWRIGHT_MODULE=/tmp/sortie-browser-check/node_modules/playwright/index.mjs node tests/training-browser.mjs
 ```
 
 The browser checks require a local server at `http://127.0.0.1:5055` (or
-`SORTIE_TEST_URL`), Playwright and Chrome. They mock upload responses and use controlled
-processed frames; the existing `tests/privacy-browser.mjs` separately checks real privacy
-models. Live upload verification requires your configured Roboflow project and key.
+`SORTIE_TEST_URL`), Playwright and Chrome. They mock upload responses and drive a
+controlled fake camera. Live upload verification requires your configured Roboflow
+project and key.

@@ -15,29 +15,52 @@ try {
     status.captured++; status.pending++;
     return route.fulfill({status: 201, json: {id: route.request().postDataJSON().id}});
   });
-  await page.route('**/static/js/privacy.mjs', route => route.fulfill({contentType: 'text/javascript', body: `
-    export class PrivacyCamera {
-      constructor(video, canvas, options) { this.canvas = canvas; this.options = options; window.testPrivacy = this; }
-      start() { this.stop(); this.canvas.width = 640; this.canvas.height = 360;
-        this.available = true; this.i = 0;
-        this.timer = setInterval(() => {
-          if (!window.testStill) this.i++;
-          const ctx = this.canvas.getContext('2d');
-          ctx.fillStyle = this.i % 2 ? '#aaa' : '#111'; ctx.fillRect(0, 0, 640, 360);
-          this.options.onFrame();
-        }, 280);
-      }
-      stop() { this.available = false; clearInterval(this.timer); this.canvas.getContext('2d').clearRect(0,0,640,360); }
-    }` }));
   await page.addInitScript(() => {
+    // Fake camera: a canvas stream that alternates between two flat colors, so
+    // motion is deterministic and `window.testStill` freezes the scene.
+    const source = document.createElement('canvas');
+    source.width = 640; source.height = 360;
+    let i = 0;
+    window.testShade = 17; // #111
+    setInterval(() => {
+      if (!window.testStill) i++;
+      window.testShade = i % 2 ? 170 : 17;
+      const ctx = source.getContext('2d');
+      ctx.fillStyle = i % 2 ? '#aaa' : '#111';
+      ctx.fillRect(0, 0, 640, 360);
+    }, 280);
+    navigator.mediaDevices.getUserMedia = async () => source.captureStream(15);
+
+    // Average brightness of a JPEG data URL, for checking what was submitted.
+    window.shadeOf = (dataUrl) => new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = img.width; c.height = img.height;
+        c.getContext('2d').drawImage(img, 0, 0);
+        const { data } = c.getContext('2d').getImageData(0, 0, img.width, img.height);
+        let total = 0;
+        for (let p = 0; p < data.length; p += 4) total += data[p];
+        resolve({ width: img.width, shade: total / (data.length / 4) });
+      };
+      img.onerror = reject;
+      img.src = dataUrl;
+    });
+
     window.calls = [];
+    window.checks = [];
     const nativeFetch = window.fetch;
     window.fetch = (url, options) => {
       if (url === '/predict' || url === '/training/captures') {
         const record = {url, at: Date.now(), mode: document.querySelector('.app').dataset.mode};
         if (url === '/training/captures') {
           const data = JSON.parse(options.body);
-          record.matches = data.image === document.querySelector('[data-private-feed]').toDataURL('image/jpeg', .95);
+          const expected = window.testShade;
+          // The capture is the live frame: JPEG, right size, right flat color.
+          record.matches = data.image.startsWith('data:image/jpeg');
+          window.checks.push(window.shadeOf(data.image).then(
+            ({ width, shade }) => { record.matches = record.matches && width <= 640 && Math.abs(shade - expected) < 12; },
+            () => { record.matches = false; }));
         }
         window.calls.push(record);
       }
@@ -54,6 +77,7 @@ try {
   await page.locator('button[data-mode="training"]').click();
   await page.evaluate(() => window.delayedPrediction());
   await page.waitForFunction(() => window.calls.filter(c => c.url === '/training/captures').length >= 3);
+  await page.evaluate(() => Promise.all(window.checks));
   let captures = await page.evaluate(() => window.calls.filter(c => c.url === '/training/captures'));
   assert.ok(captures.every(c => c.matches && c.mode === 'training'));
   assert.ok(captures.slice(1).every((c, i) => c.at - captures[i].at >= 3000));
@@ -71,12 +95,7 @@ try {
   await page.evaluate(() => { Object.defineProperty(document, 'hidden', {value:true,configurable:true}); document.dispatchEvent(new Event('visibilitychange')); });
   before = await count(); await page.waitForTimeout(3400); assert.equal(await count(), before);
   await page.evaluate(() => { Object.defineProperty(document, 'hidden', {value:false,configurable:true}); document.dispatchEvent(new Event('visibilitychange')); });
-  await page.waitForFunction(() => window.testPrivacy.available);
-  await page.evaluate(() => window.testPrivacy.options.onError({name:'PrivacyError'}));
-  before = await count(); await page.waitForTimeout(3400); assert.equal(await count(), before);
-  assert.equal(await page.locator('[data-error-title]').textContent(), 'Privacy blur unavailable');
-  await page.locator('[data-retry]').click();
-  await page.waitForFunction(() => window.testPrivacy.available);
+  await page.waitForFunction(n => window.calls.filter(c => c.url === '/training/captures').length > n, before);
   await page.screenshot({path:'/tmp/sortie-training-desktop.png'});
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
@@ -100,5 +119,5 @@ try {
   await page.reload();
   assert.equal(await page.locator('.app').getAttribute('data-mode'), 'normal');
   assert.deepEqual(errors, []);
-  console.log('PASS cadence, processed JPEG, still scenes, pause/resume, hidden tab, privacy failure, late predictions, verdict switches, queue full, setup, keyboard, mobile, reload');
+  console.log('PASS cadence, captured JPEG, still scenes, pause/resume, hidden tab, late predictions, verdict switches, queue full, setup, keyboard, mobile, reload');
 } finally { await browser.close(); }

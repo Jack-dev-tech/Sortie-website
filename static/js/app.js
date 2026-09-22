@@ -3,7 +3,6 @@
    Webcam → sample frames → POST /predict → state machine → verdict animation
    ========================================================================= */
 
-import { PrivacyCamera } from "./privacy.mjs";
 import { TrainingCapture } from "./training.mjs";
 
 (() => {
@@ -22,6 +21,10 @@ import { TrainingCapture } from "./training.mjs";
   const MOTION_PIXEL_DELTA = 26; // per-pixel brightness change that counts as movement
   const MOTION_AREA_MIN = 0.01; // fraction of pixels that must move to call it "motion"
 
+  // Training captures: bigger and less compressed than the classifier frame.
+  const CAPTURE_WIDTH = 640;
+  const CAPTURE_QUALITY = 0.95;
+
   const CATEGORIES = {
     glass:   { color: "--glass",   cheer: "Glass goes here — thanks!" },
     paper:   { color: "--paper",   cheer: "Paper, sorted. Nice one!" },
@@ -32,7 +35,6 @@ import { TrainingCapture } from "./training.mjs";
   // ---- Elements ---------------------------------------------------------
   const app = document.querySelector(".app");
   const feed = document.querySelector("[data-feed]");
-  const privateFeed = document.querySelector("[data-private-feed]");
   const grabber = document.querySelector("[data-grabber]");
   const viewport = document.querySelector("[data-viewport]");
   const verdictEl = document.querySelector("[data-verdict]");
@@ -88,17 +90,19 @@ import { TrainingCapture } from "./training.mjs";
   let predictionRequest = null;
   let resultTimer = null;
   let resumeCamera = false;
-  const privacy = new PrivacyCamera(feed, privateFeed, {
-    onFrame() {
-      if (state === "loading") setState("idle");
-      // Privacy rendering continues during verdicts; only classification pauses.
-      if (Date.now() - lastMotionAt >= MOTION_INTERVAL) {
-        lastMotionAt = Date.now();
-        tick();
-      }
-    },
-    onError: showError,
-  });
+  let frameRaf = null;
+  let cameraReady = false; // the video is playing and has real dimensions
+
+  // Drives the capture loop off the live video, throttled to MOTION_INTERVAL.
+  function frameLoop() {
+    frameRaf = requestAnimationFrame(frameLoop);
+    if (!stream || document.hidden || feed.readyState < 2 || !feed.videoWidth) return;
+    cameraReady = true;
+    if (state === "loading") setState("idle");
+    if (Date.now() - lastMotionAt < MOTION_INTERVAL) return;
+    lastMotionAt = Date.now();
+    tick();
+  }
 
   function setState(next) {
     state = next;
@@ -141,8 +145,7 @@ import { TrainingCapture } from "./training.mjs";
       feed.srcObject = stream;
       await feed.play();
       if (session !== cameraSession) return;
-      statusLabel.textContent = "Starting privacy blur…";
-      privacy.start();
+      if (!frameRaf) frameLoop();
     } catch (err) {
       if (session === cameraSession) showError(err);
     }
@@ -150,7 +153,9 @@ import { TrainingCapture } from "./training.mjs";
 
   function stopCamera() {
     cameraSession++;
-    privacy.stop();
+    cancelAnimationFrame(frameRaf);
+    frameRaf = null;
+    cameraReady = false;
     training.ready = false;
     training.render();
     predictionRequest?.abort();
@@ -174,11 +179,7 @@ import { TrainingCapture } from "./training.mjs";
     setState("error");
     const denied = err && (err.name === "NotAllowedError" || err.name === "SecurityError");
     const missing = err && (err.name === "NotFoundError" || err.name === "OverconstrainedError");
-    if (err?.name === "PrivacyError") {
-      errorTitle.textContent = "Privacy blur unavailable";
-      errorMsg.textContent =
-        "The camera is paused because people could not be blurred. Try again using a current browser.";
-    } else if (denied) {
+    if (denied) {
       errorTitle.textContent = "Camera access blocked";
       errorMsg.textContent =
         "Sortie needs your camera to see items. Allow it in your browser, then try again.";
@@ -199,7 +200,7 @@ import { TrainingCapture } from "./training.mjs";
   // ---- Capture loop -----------------------------------------------------
   // The loop watches for motion; the model only runs while something moves.
   function tick() {
-    if (!stream || !privacy.available || document.hidden) return;
+    if (!stream || !cameraReady || document.hidden) return;
     if (holding && !training.active) return;
 
     const motion = detectMotion();
@@ -210,7 +211,7 @@ import { TrainingCapture } from "./training.mjs";
     }
 
     if (training.active) {
-      training.tick(Boolean(motion), privateFeed, true);
+      training.tick(Boolean(motion), () => captureJPEG(CAPTURE_WIDTH, CAPTURE_QUALITY), true);
       return;
     }
 
@@ -218,7 +219,7 @@ import { TrainingCapture } from "./training.mjs";
     if (!motion || inFlight) return;
     if (Date.now() - lastPredictAt < PREDICT_MIN_GAP) return;
 
-    const frame = grabFrame();
+    const frame = captureJPEG(FRAME_WIDTH, 0.7);
     if (frame) {
       lastPredictAt = Date.now();
       sendFrame(frame);
@@ -230,8 +231,8 @@ import { TrainingCapture } from "./training.mjs";
   // Returns { box } (normalised 0..1, in raw camera coords) when enough of the
   // frame changed, otherwise null.
   function detectMotion() {
-    const vw = privateFeed.width;
-    const vh = privateFeed.height;
+    const vw = feed.videoWidth;
+    const vh = feed.videoHeight;
     if (!vw || !vh) return null;
 
     if (!motionCanvas) motionCanvas = document.createElement("canvas");
@@ -241,7 +242,7 @@ import { TrainingCapture } from "./training.mjs";
     motionCanvas.height = gh;
 
     const ctx = motionCanvas.getContext("2d", { willReadFrequently: true });
-    ctx.drawImage(privateFeed, 0, 0, gw, gh);
+    ctx.drawImage(feed, 0, 0, gw, gh);
     const { data } = ctx.getImageData(0, 0, gw, gh);
 
     const gray = new Uint8ClampedArray(gw * gh);
@@ -296,8 +297,8 @@ import { TrainingCapture } from "./training.mjs";
   function drawMotionBox(box) {
     const cw = viewport.clientWidth;
     const ch = viewport.clientHeight;
-    const vw = privateFeed.width;
-    const vh = privateFeed.height;
+    const vw = feed.videoWidth;
+    const vh = feed.videoHeight;
     if (!vw || !vh || !cw || !ch) return;
 
     const scale = Math.max(cw / vw, ch / vh); // object-fit: cover
@@ -324,16 +325,17 @@ import { TrainingCapture } from "./training.mjs";
     if (motionBox) motionBox.hidden = true;
   }
 
-  function grabFrame() {
-    const vw = privateFeed.width;
-    const vh = privateFeed.height;
-    if (!privacy.available || !vw || !vh) return null;
-    const scale = FRAME_WIDTH / vw;
-    grabber.width = FRAME_WIDTH;
-    grabber.height = Math.round(vh * scale);
+  // Snapshot the live video into the offscreen grabber canvas as a JPEG data URL.
+  function captureJPEG(maxWidth, quality) {
+    const vw = feed.videoWidth;
+    const vh = feed.videoHeight;
+    if (!cameraReady || !vw || !vh) return null;
+    const width = Math.min(maxWidth, vw);
+    grabber.width = width;
+    grabber.height = Math.max(1, Math.round((vh * width) / vw));
     const ctx = grabber.getContext("2d");
-    ctx.drawImage(privateFeed, 0, 0, grabber.width, grabber.height);
-    return grabber.toDataURL("image/jpeg", 0.7);
+    ctx.drawImage(feed, 0, 0, grabber.width, grabber.height);
+    return grabber.toDataURL("image/jpeg", quality);
   }
 
   async function sendFrame(dataUrl) {
@@ -563,7 +565,7 @@ import { TrainingCapture } from "./training.mjs";
     document.querySelectorAll("button[data-mode]").forEach((button) => {
       button.setAttribute("aria-pressed", String((button.dataset.mode === "training") === active));
     });
-    setState(state === "error" ? "error" : privacy.available ? "idle" : "loading");
+    setState(state === "error" ? "error" : cameraReady ? "idle" : "loading");
   }
   document.querySelectorAll("button[data-mode]").forEach((button) => {
     button.addEventListener("click", () => selectMode(button.dataset.mode === "training"));
