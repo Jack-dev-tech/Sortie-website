@@ -43,8 +43,8 @@
       <!-- scanning sweep -->
       <div class="scanline" aria-hidden="true"></div>
 
-      <!-- red box tracking whatever is moving in frame -->
-      <div class="motion-box" data-motion-box aria-hidden="true" hidden></div>
+      <!-- red boxes tracking each hand and the item it is holding -->
+      <div class="motion-boxes" data-motion-boxes aria-hidden="true"></div>
 
       <!-- idle pulse ring -->
       <div class="reticle" aria-hidden="true">
@@ -164,8 +164,8 @@
       <div><dt>Uploaded</dt><dd data-count-uploaded>—</dd></div>
       <div><dt>Pending</dt><dd data-count-pending>—</dd></div>
     </dl>
-    <p class="training-note">Motion triggers captures, including other movement. Stationary items are not repeatedly captured. Images are sent to Roboflow for manual labeling only.</p>
-    <p class="training-empty" data-training-empty>No captures this visit. Move an item in view to begin.</p>
+    <p class="training-note">A hand moving an item in view triggers captures. Movement elsewhere in the room, and items held still, are not captured. Images are sent to Roboflow for manual labeling only.</p>
+    <p class="training-empty" data-training-empty>No captures this visit. Hold an item up to the camera to begin.</p>
     <div class="training-recent" data-training-recent aria-label="Recent captures this visit"></div>
   </section>
 

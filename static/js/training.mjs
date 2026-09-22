@@ -86,13 +86,16 @@ export class TrainingCapture {
       (!this.ready ? 'Capture paused until the camera is ready.' : null) ||
       (this.paused ? 'Capture paused. Saved images continue uploading.' : null) ||
       (this.pending ? 'Saving capture to the local queue…' : null) ||
-      s?.error || (s ? 'Watching for motion · at most one image every 3 seconds' : 'Checking Roboflow setup…');
+      s?.error ||
+      (s ? 'Watching for a hand holding an item · at most one image every 3 seconds'
+         : 'Checking Roboflow setup…');
   }
 
-  tick(motion, capture, ready) {
+  // `trigger` is true while a hand is moving an item in view; app.js decides that.
+  tick(trigger, capture, ready) {
     if (this.ready !== ready) { this.ready = ready; this.render(); }
     if (!this.active || !ready || document.hidden || this.paused || !this.status?.can_capture ||
-        this.pending || !motion || Date.now() - this.lastCapture < 3000) return;
+        this.pending || !trigger || Date.now() - this.lastCapture < 3000) return;
     const image = capture();
     if (!image) return;
     this.lastCapture = Date.now();

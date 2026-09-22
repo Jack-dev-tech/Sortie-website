@@ -13,6 +13,7 @@ is done, you drop it into one file and flip one switch.
 python3 -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+python tools/fetch_hand_assets.py   # one-time, ~31 MB — see "Hand detection"
 python app.py
 ```
 
@@ -20,6 +21,34 @@ Then open **http://localhost:5000** and allow camera access when prompted.
 
 > Browsers only allow the camera on `localhost` or over HTTPS. `localhost` is
 > fine — you don't need a certificate for local use.
+
+## Hand detection
+
+Sortie watches for a **hand**, not for movement. In Normal mode it classifies
+whenever a hand is in frame — including an item held perfectly still. In Training
+mode it captures when a hand is *moving* an item, so holding still doesn't fill
+Roboflow with near-identical frames. The red box hugs the hand and whatever is
+moving within its reach; a passer-by, a shifting shadow or your own torso never
+widens it. An item shown **without** a hand (set on a table, on a conveyor)
+triggers nothing.
+
+The detector is MediaPipe's Hand Landmarker, running in the browser. Its assets
+are vendored rather than loaded from a CDN so a kiosk works offline:
+
+```bash
+python tools/fetch_hand_assets.py          # fetch anything missing
+python tools/fetch_hand_assets.py --force  # re-download
+```
+
+It writes `static/vendor/tasks-vision/` (the ES module + wasm runtime) and
+`static/models/hand_landmarker.task`, both git-ignored. The script is stdlib-only,
+so it runs before `pip install`. Pin a different `tasks-vision` release by editing
+`TASKS_VISION` at the top of the script.
+
+**If the assets are missing** — or WebGL and the CPU delegate both fail — the site
+still works: `static/js/hands.mjs` reports the tracker as unavailable, the console
+says so once, and `app.js` reverts to the whole-frame motion detection it used
+before hand tracking existed.
 
 ## Plug in your model
 
@@ -102,11 +131,16 @@ Browser (webcam) ──────────────POST /predict {image}
 
 ## Tuning the feel
 
-- **Frontend** (`static/js/app.js`, top of file): `MOTION_INTERVAL` (motion check
-  frequency), `PREDICT_MIN_GAP` (minimum time between submissions),
-  `CONFIDENCE_MIN` (ignore uncertain guesses), `STABLE_FRAMES`
-  (how many matching frames lock a result), `RESULT_HOLD` (how long the verdict
-  shows).
+- **Frontend** (`static/js/app.js`, top of file): `TRACK_INTERVAL` (how often
+  hands and motion are checked), `HAND_REACH` (how far past the hand to look for
+  the item it holds — raise it for long items, lower it if the box picks up
+  background), `MOTION_AREA_MIN_LOCAL` (how much of that region must change to
+  call the item "moving", which is what gates training captures),
+  `PREDICT_MIN_GAP` (minimum time between submissions), `CONFIDENCE_MIN` (ignore
+  uncertain guesses), `STABLE_FRAMES` (how many matching frames lock a result),
+  `RESULT_HOLD` (how long the verdict shows). `MOTION_PIXEL_DELTA` and
+  `MOTION_AREA_MIN` tune the raw frame-diff and the no-hand fallback.
+  `HAND_PAD` (`static/js/hands.mjs`) pads the box around the landmarks.
 - **Colors / type** (`static/css/styles.css`, `:root`): the four category colors
   and fonts.
 
@@ -119,6 +153,8 @@ Browser (webcam) ──────────────POST /predict {image}
 | `templates/index.html` | Page markup + bin icons |
 | `static/css/styles.css` | Theme, layout, animations |
 | `static/js/app.js` | Webcam, capture loop, state machine, animations |
+| `static/js/hands.mjs` | MediaPipe Hand Landmarker wrapper (hand boxes) |
+| `tools/fetch_hand_assets.py` | One-time download of the hand-tracking assets |
 
 ## Training mode: collect and label online
 
@@ -138,10 +174,11 @@ or train/deploy a model. Every reload starts in Normal.
    python app.py
    ```
 
-3. Select Training. Once the camera is ready, movement triggers at
-   most one capture every three seconds. Other movement can trigger captures;
-   stationary items are not repeatedly captured. **Pause capture** stops new captures.
-   Leaving the tab or losing the camera also pauses capture.
+3. Select Training. Once the camera is ready, a hand moving an item in view
+   triggers at most one capture every three seconds. Movement elsewhere in the
+   room does not trigger a capture, and an item held still is not captured
+   repeatedly. **Pause capture** stops new captures. Leaving the tab or losing the
+   camera also pauses capture.
 4. Choose **Open Roboflow**, find the `sortie-<session UUID>` upload batch, and open
    its images in Annotate. Draw bounding boxes and assign the four classes manually.
    Check the first uploaded image is unannotated and can be labeled before collecting
@@ -185,5 +222,6 @@ PLAYWRIGHT_MODULE=/tmp/sortie-browser-check/node_modules/playwright/index.mjs no
 
 The browser checks require a local server at `http://127.0.0.1:5055` (or
 `SORTIE_TEST_URL`), Playwright and Chrome. They mock upload responses and drive a
-controlled fake camera. Live upload verification requires your configured Roboflow
+controlled fake camera, and set `window.__sortieTestHands` to stand in for the
+hand tracker — a synthetic camera stream cannot contain a real hand. Live upload verification requires your configured Roboflow
 project and key.

@@ -206,14 +206,19 @@ body {
   50%      { transform: scale(1.04); opacity: 1; }
 }
 
-/* Red box drawn around whatever is currently moving in frame */
+/* Red boxes drawn around each tracked hand and the item it is holding */
+.motion-boxes {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+}
+
 .motion-box {
   position: absolute;
   border: 2px solid #ff2d2d;
   border-radius: 4px;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 0 12px rgba(255, 45, 45, 0.5);
-  pointer-events: none;
-  z-index: 4;
   transition: left 120ms linear, top 120ms linear,
     width 120ms linear, height 120ms linear;
 }

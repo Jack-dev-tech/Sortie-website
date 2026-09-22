@@ -5,3 +5,7 @@ model.tflite
 data/
 .env
 __pycache__/
+
+# MediaPipe hand-tracking assets (python tools/fetch_hand_assets.py)
+static/vendor/
+static/models/

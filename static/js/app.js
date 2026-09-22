@@ -4,12 +4,13 @@
    ========================================================================= */
 
 import { TrainingCapture } from "./training.mjs";
+import { HandTracker } from "./hands.mjs";
 
 (() => {
   "use strict";
 
   // ---- Tunables ---------------------------------------------------------
-  const MOTION_INTERVAL = 250; // ms between motion checks (keeps the red box lively)
+  const TRACK_INTERVAL = 100; // ms between hand/motion checks (the red box follows a hand)
   const PREDICT_MIN_GAP = 1200; // ms — don't fire the model more often than this
   const FRAME_WIDTH = 320; // downscale width sent over the wire (keeps it light)
   const CONFIDENCE_MIN = 0.75; // ignore predictions less certain than this
@@ -19,7 +20,13 @@ import { TrainingCapture } from "./training.mjs";
   // Motion detection: compare small greyscale snapshots frame-to-frame.
   const MOTION_WIDTH = 64; // downscaled width used for the frame-diff
   const MOTION_PIXEL_DELTA = 26; // per-pixel brightness change that counts as movement
-  const MOTION_AREA_MIN = 0.01; // fraction of pixels that must move to call it "motion"
+  const MOTION_AREA_MIN = 0.01; // whole-frame fraction that must move — fallback path only
+
+  // Hand tracking: how far past the hand to look for the thing it is holding,
+  // and how much of that region has to change to call the held item "moving".
+  const HAND_REACH = 0.9; // multiples of the hand box's larger side
+  const MOTION_AREA_MIN_LOCAL = 0.02; // changed fraction *within reach*
+  const MAX_BOXES = 2; // one red box per tracked hand
 
   // Training captures: bigger and less compressed than the classifier frame.
   const CAPTURE_WIDTH = 640;
@@ -51,7 +58,7 @@ import { TrainingCapture } from "./training.mjs";
   const errorMsg = document.querySelector("[data-error-msg]");
   const retryBtn = document.querySelector("[data-retry]");
   const confettiCanvas = document.querySelector("[data-confetti]");
-  const motionBox = document.querySelector("[data-motion-box]");
+  const motionBoxes = document.querySelector("[data-motion-boxes]");
   const bins = new Map(
     [...document.querySelectorAll("[data-bin]")].map((el) => [el.dataset.bin, el])
   );
@@ -75,6 +82,7 @@ import { TrainingCapture } from "./training.mjs";
   };
 
   const training = new TrainingCapture();
+  const handTracker = new HandTracker();
   let modeGeneration = 0;
   let confettiRaf = null;
   let state = "loading";
@@ -93,13 +101,13 @@ import { TrainingCapture } from "./training.mjs";
   let frameRaf = null;
   let cameraReady = false; // the video is playing and has real dimensions
 
-  // Drives the capture loop off the live video, throttled to MOTION_INTERVAL.
+  // Drives the capture loop off the live video, throttled to TRACK_INTERVAL.
   function frameLoop() {
     frameRaf = requestAnimationFrame(frameLoop);
     if (!stream || document.hidden || feed.readyState < 2 || !feed.videoWidth) return;
     cameraReady = true;
     if (state === "loading") setState("idle");
-    if (Date.now() - lastMotionAt < MOTION_INTERVAL) return;
+    if (Date.now() - lastMotionAt < TRACK_INTERVAL) return;
     lastMotionAt = Date.now();
     tick();
   }
@@ -170,7 +178,7 @@ import { TrainingCapture } from "./training.mjs";
     if (stream) stream.getTracks().forEach((t) => t.stop());
     stream = null;
     feed.srcObject = null;
-    hideMotionBox();
+    hideMotionBoxes();
     prevGray = null;
   }
 
@@ -198,25 +206,34 @@ import { TrainingCapture } from "./training.mjs";
   }
 
   // ---- Capture loop -----------------------------------------------------
-  // The loop watches for motion; the model only runs while something moves.
+  // The loop watches for a hand; the model only runs while one is holding
+  // something up. Movement elsewhere in the room is ignored.
   function tick() {
     if (!stream || !cameraReady || document.hidden) return;
-    if (holding && !training.active) return;
 
-    const motion = detectMotion();
-    if (motion) {
-      drawMotionBox(motion.box);
-    } else {
-      hideMotionBox();
-    }
+    const diff = diffFrame();
+    const hands = handTracker.detect(feed);
+    const regions = handTracker.available ? handRegions(hands, diff) : fallbackRegions(diff);
+    drawMotionBoxes(regions);
+
+    // With hand tracking a hand in frame is the trigger; without it, any motion is.
+    const present = handTracker.available ? hands.length > 0 : regions.length > 0;
 
     if (training.active) {
-      training.tick(Boolean(motion), () => captureJPEG(CAPTURE_WIDTH, CAPTURE_QUALITY), true);
+      // Training also waits for the item to move, so someone holding still
+      // doesn't fill Roboflow with near-identical frames.
+      const itemMoved = regions.some((region) => region.moved);
+      training.tick(present && itemMoved, () => captureJPEG(CAPTURE_WIDTH, CAPTURE_QUALITY), true);
       return;
     }
 
-    // Only scan while there's movement — a still scene is left alone.
-    if (!motion || inFlight) return;
+    // A verdict is on screen: keep the box tracking the hand, but don't
+    // re-classify until it clears.
+    if (holding) return;
+
+    // An item held perfectly steady still gets classified — only an empty
+    // frame stops the model.
+    if (!present || inFlight) return;
     if (Date.now() - lastPredictAt < PREDICT_MIN_GAP) return;
 
     const frame = captureJPEG(FRAME_WIDTH, 0.7);
@@ -228,9 +245,8 @@ import { TrainingCapture } from "./training.mjs";
 
   // ---- Motion detection -------------------------------------------------
   // Diff a small greyscale version of the current frame against the last one.
-  // Returns { box } (normalised 0..1, in raw camera coords) when enough of the
-  // frame changed, otherwise null.
-  function detectMotion() {
+  // Returns the raw per-cell change mask; callers pick which part of it matters.
+  function diffFrame() {
     const vw = feed.videoWidth;
     const vh = feed.videoHeight;
     if (!vw || !vh) return null;
@@ -257,23 +273,39 @@ import { TrainingCapture } from "./training.mjs";
       return null;
     }
 
-    let moved = 0;
-    let minX = gw, minY = gh, maxX = -1, maxY = -1;
-    for (let y = 0; y < gh; y++) {
-      for (let x = 0; x < gw; x++) {
-        const p = y * gw + x;
-        if (Math.abs(gray[p] - prevGray[p]) > MOTION_PIXEL_DELTA) {
-          moved++;
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
-          if (y > maxY) maxY = y;
-        }
-      }
+    const changed = new Uint8Array(gw * gh);
+    for (let p = 0; p < gray.length; p++) {
+      if (Math.abs(gray[p] - prevGray[p]) > MOTION_PIXEL_DELTA) changed[p] = 1;
     }
     prevGray = gray;
+    return { w: gw, h: gh, changed };
+  }
 
-    if (moved / (gw * gh) < MOTION_AREA_MIN || maxX < 0) return null;
+  const cell = (v, n) => Math.min(n - 1, Math.max(0, Math.floor(v)));
+
+  // Bounding box of the cells that changed inside `region` (a normalised box, or
+  // the whole frame when null), plus how much of that region moved.
+  function boxOfChanged(diff, region) {
+    if (!diff) return null;
+    const { w: gw, h: gh, changed } = diff;
+    const x0 = region ? cell(region.x * gw, gw) : 0;
+    const y0 = region ? cell(region.y * gh, gh) : 0;
+    const x1 = region ? cell(Math.ceil((region.x + region.w) * gw) - 1, gw) : gw - 1;
+    const y1 = region ? cell(Math.ceil((region.y + region.h) * gh) - 1, gh) : gh - 1;
+
+    let moved = 0;
+    let minX = gw, minY = gh, maxX = -1, maxY = -1;
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        if (!changed[y * gw + x]) continue;
+        moved++;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+    if (maxX < 0) return null;
 
     // Pad the box out by one cell so it hugs the object a little less tightly.
     minX = Math.max(0, minX - 1);
@@ -288,13 +320,61 @@ import { TrainingCapture } from "./training.mjs";
         w: (maxX - minX + 1) / gw,
         h: (maxY - minY + 1) / gh,
       },
+      moved,
+      cells: (x1 - x0 + 1) * (y1 - y0 + 1),
     };
   }
 
-  // ---- Red motion box ---------------------------------------------------
-  // Map a normalised box from raw camera space into the mirrored, object-fit:
-  // cover viewport and position the overlay over it.
-  function drawMotionBox(box) {
+  // ---- Regions of interest ----------------------------------------------
+  // What the red box tracks: a hand, plus whatever is moving within its reach —
+  // the item it is holding. Motion anywhere else falls outside every reach box
+  // and is ignored, so a passer-by or a shifting shadow never widens the box.
+  function handRegions(hands, diff) {
+    const regions = hands.slice(0, MAX_BOXES).map((hand) => {
+      const reach = grow(hand, Math.max(hand.w, hand.h) * HAND_REACH);
+      const item = boxOfChanged(diff, reach);
+      const moved = Boolean(item) && item.moved / item.cells >= MOTION_AREA_MIN_LOCAL;
+      return { ...(item ? union(hand, item.box) : hand), moved };
+    });
+    // Two hands on the same item read as one box rather than two crossing ones.
+    if (regions.length === 2 && overlaps(regions[0], regions[1])) {
+      return [{ ...union(regions[0], regions[1]), moved: regions[0].moved || regions[1].moved }];
+    }
+    return regions;
+  }
+
+  // Without hand tracking the box is whatever moved anywhere in frame — exactly
+  // how Sortie behaved before hand detection existed.
+  function fallbackRegions(diff) {
+    const found = boxOfChanged(diff, null);
+    if (!found || found.moved / found.cells < MOTION_AREA_MIN) return [];
+    return [{ ...found.box, moved: true }];
+  }
+
+  function grow(box, by) {
+    const x = Math.max(0, box.x - by);
+    const y = Math.max(0, box.y - by);
+    return {
+      x,
+      y,
+      w: Math.min(1, box.x + box.w + by) - x,
+      h: Math.min(1, box.y + box.h + by) - y,
+    };
+  }
+
+  function union(a, b) {
+    const x = Math.min(a.x, b.x);
+    const y = Math.min(a.y, b.y);
+    return { x, y, w: Math.max(a.x + a.w, b.x + b.w) - x, h: Math.max(a.y + a.h, b.y + b.h) - y };
+  }
+
+  const overlaps = (a, b) =>
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+  // ---- Red boxes --------------------------------------------------------
+  // Map normalised boxes from raw camera space into the mirrored, object-fit:
+  // cover viewport and position one overlay over each.
+  function drawMotionBoxes(regions) {
     const cw = viewport.clientWidth;
     const ch = viewport.clientHeight;
     const vw = feed.videoWidth;
@@ -307,22 +387,37 @@ import { TrainingCapture } from "./training.mjs";
     const offX = (dw - cw) / 2;
     const offY = (dh - ch) / 2;
 
-    const w = box.w * dw;
-    const h = box.h * dh;
-    let left = box.x * dw - offX;
-    const top = box.y * dh - offY;
-    // The feed is mirrored (scaleX(-1)), so flip the box horizontally too.
-    left = cw - (left + w);
+    regions.forEach((box, i) => {
+      const el = boxAt(i);
+      const w = box.w * dw;
+      const h = box.h * dh;
+      const top = box.y * dh - offY;
+      // The feed is mirrored (scaleX(-1)), so flip the box horizontally too.
+      const left = cw - (box.x * dw - offX + w);
 
-    motionBox.style.left = `${left}px`;
-    motionBox.style.top = `${top}px`;
-    motionBox.style.width = `${w}px`;
-    motionBox.style.height = `${h}px`;
-    motionBox.hidden = false;
+      el.style.left = `${left}px`;
+      el.style.top = `${top}px`;
+      el.style.width = `${w}px`;
+      el.style.height = `${h}px`;
+      el.hidden = false;
+    });
+    for (let i = regions.length; i < motionBoxes.children.length; i++) {
+      motionBoxes.children[i].hidden = true;
+    }
   }
 
-  function hideMotionBox() {
-    if (motionBox) motionBox.hidden = true;
+  // The overlay pool — grows to at most one element per tracked hand.
+  function boxAt(i) {
+    while (motionBoxes.children.length <= i) {
+      const el = document.createElement("div");
+      el.className = "motion-box";
+      motionBoxes.appendChild(el);
+    }
+    return motionBoxes.children[i];
+  }
+
+  function hideMotionBoxes() {
+    for (const el of motionBoxes.children) el.hidden = true;
   }
 
   // Snapshot the live video into the offscreen grabber canvas as a JPEG data URL.
@@ -588,5 +683,6 @@ import { TrainingCapture } from "./training.mjs";
     if (event.persisted && !document.hidden) startCamera();
   });
 
+  handTracker.load(); // resolves in the background; the loop falls back until it does
   startCamera();
 })();

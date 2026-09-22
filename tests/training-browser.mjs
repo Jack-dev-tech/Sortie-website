@@ -16,6 +16,12 @@ try {
     return route.fulfill({status: 201, json: {id: route.request().postDataJSON().id}});
   });
   await page.addInitScript(() => {
+    // A real hand can't appear in a synthetic camera stream, so stand in for the
+    // hand tracker: one hand parked in the middle of the frame, normalised to
+    // raw camera coords. app.js then gates on motion inside its reach, which
+    // `window.testStill` still controls.
+    window.__sortieTestHands = [{ x: 0.4, y: 0.4, w: 0.2, h: 0.2 }];
+
     // Fake camera: a canvas stream that alternates between two flat colors, so
     // motion is deterministic and `window.testStill` freezes the scene.
     const source = document.createElement('canvas');
@@ -83,6 +89,13 @@ try {
   assert.ok(captures.slice(1).every((c, i) => c.at - captures[i].at >= 3000));
   assert.equal(await page.locator('.app').getAttribute('data-state'), 'idle');
   assert.equal(await page.evaluate(() => window.calls.some(c => c.url === '/predict' && c.mode === 'training')), false);
+  // One red box, drawn over the fake hand rather than over the whole frame.
+  assert.equal(await page.locator('.motion-box:not([hidden])').count(), 1);
+  const [view, box] = await page.evaluate(() => [
+    document.querySelector('[data-viewport]').getBoundingClientRect(),
+    document.querySelector('.motion-box:not([hidden])').getBoundingClientRect(),
+  ]);
+  assert.ok(box.width > 0 && box.width < view.width && box.height < view.height);
   const count = () => page.evaluate(() => window.calls.filter(c => c.url === '/training/captures').length);
   await page.locator('[data-training-pause]').click();
   let before = await count(); await page.waitForTimeout(3400); assert.equal(await count(), before);
