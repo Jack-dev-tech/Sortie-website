@@ -1,0 +1,2 @@
+# Separate environment from Sortie; Python 3.11 on 64-bit Linux.
+label-studio==1.23.0

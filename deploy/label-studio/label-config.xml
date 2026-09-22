@@ -1,0 +1,9 @@
+<View>
+  <Image name="image" value="$image"/>
+  <RectangleLabels name="label" toName="image">
+    <Label value="glass" background="#56B4E9"/>
+    <Label value="paper" background="#E6A23C"/>
+    <Label value="plastic" background="#50A878"/>
+    <Label value="waste" background="#8C859E"/>
+  </RectangleLabels>
+</View>

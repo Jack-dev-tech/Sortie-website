@@ -27,7 +27,7 @@ Then open **http://localhost:5000** and allow camera access when prompted.
 Sortie watches for a **hand**, not for movement. In Normal mode it classifies
 whenever a hand is in frame — including an item held perfectly still. In Training
 mode it captures when a hand is *moving* an item, so holding still doesn't fill
-Roboflow with near-identical frames. The red box hugs the hand and whatever is
+Label Studio with near-identical frames. The red box hugs the hand and whatever is
 moving within its reach; a passer-by, a shifting shadow or your own torso never
 widens it. An item shown **without** a hand (set on a table, on a conveyor)
 triggers nothing.
@@ -162,66 +162,82 @@ Use the bottom-left **Normal / Training** switch to collect images for manual
 bounding-box labeling. Training mode does not classify, recommend bins, auto-label,
 or train/deploy a model. Every reload starts in Normal.
 
-1. In [Roboflow](https://app.roboflow.com), create an **Object Detection** project.
-   Use the four class names **glass**, **paper**, **plastic**, **waste** when labeling.
-2. Get a private API key with access to that project. Set these variables in the
-   server environment (the app does not automatically load `.env` files):
+Use **Label Studio Community Edition** on the same Pi or mini PC as Sortie.
+Connect from another computer through private Tailscale HTTPS access. Follow the
+[host installation and remote annotation guide](deploy/label-studio/README.md)
+for persistent storage, project setup, startup services, backup and verification.
+The host must stay on; this Mac does not need to stay on.
 
-   ```sh
-   export ROBOFLOW_API_KEY='your-private-key'
-   export ROBOFLOW_WORKSPACE='your-workspace-slug'
-   export ROBOFLOW_PROJECT='your-project-slug'
-   python app.py
-   ```
+For an already running Label Studio server, set these on the Sortie server:
 
-3. Select Training. Once the camera is ready, a hand moving an item in view
-   triggers at most one capture every three seconds. Movement elsewhere in the
-   room does not trigger a capture, and an item held still is not captured
-   repeatedly. **Pause capture** stops new captures. Leaving the tab or losing the
-   camera also pauses capture.
-4. Choose **Open Roboflow**, find the `sortie-<session UUID>` upload batch, and open
-   its images in Annotate. Draw bounding boxes and assign the four classes manually.
-   Check the first uploaded image is unannotated and can be labeled before collecting
-   a larger session. Roboflow may recognize an existing duplicate image; existing
-   annotations on that image are not removed.
+```sh
+export LABEL_STUDIO_URL='http://127.0.0.1:8080'
+export LABEL_STUDIO_PUBLIC_URL='https://sortie.YOUR-TAILNET.ts.net'
+export LABEL_STUDIO_API_KEY='your-personal-access-token'
+export LABEL_STUDIO_PROJECT_ID='1'
+python app.py
+```
+
+Use the supplied [bounding-box configuration](deploy/label-studio/label-config.xml)
+in the Label Studio project. URLs must be HTTP(S) origins without paths, query
+strings or embedded credentials. The public URL defaults to the API URL for local
+development; set it explicitly for remote annotation. Variables must be exported;
+the app does not automatically load `.env` files. Credentials stay on the server.
+
+Select **Training**. A hand moving an item triggers at most one capture every
+three seconds. **Pause capture**, leaving the tab, or losing the camera stops
+new captures; saved images continue uploading even in Normal mode. Choose
+**Open Label Studio** to draw boxes manually using **glass, paper, plastic, waste**.
+Check one image loads and an annotation saves from the remote computer before
+collecting a large session. No predictions or annotations are sent by Sortie.
 
 Captures contain the complete camera frame at up to 640 pixels wide, encoded as
-95%-quality JPEG. Thumbnails
-show the six most recently saved images from this page visit. Counts include all
-captures recorded in this local queue, across sessions; pending includes failed uploads.
+95%-quality JPEG. Thumbnails show the six most recently saved images from this
+page visit. Uploaded filenames include both session and capture UUIDs:
+`sortie-<session UUID>-<capture UUID>.jpg`.
 
-The server stores JPEG bytes and queue records atomically in
-`data/training/captures.sqlite3` (ignored by Git). Set `SORTIE_TRAINING_DIR` to choose
-another persistent local directory. Do not place it under `static/`. Successful uploads
-record the Roboflow image ID and clear the JPEG blob; SQLite reuses freed storage.
-Saved captures continue uploading in Normal and resume after server restarts.
-An interrupted upload is eligible for recovery after its three-minute worker lease.
-Network errors, HTTP 429 and server errors retry with exponential backoff, up to five
-minutes. Authentication/project errors require fixing server settings, restarting,
-and choosing **Retry uploads**. Pending records retain their original workspace/project. **Retry uploads** applies
-the current server workspace/project to failed records, allowing you to correct a typo.
+The durable queue lives in `data/training/captures.sqlite3` (Git-ignored), or the
+persistent directory specified by `SORTIE_TRAINING_DIR`. Never put it under
+`static/`. Once Label Studio confirms a task ID, Sortie records it and clears its
+JPEG blob. Label Studio keeps the image in its own storage, so annotation does
+not depend on the capture browser remaining open. Back up Label Studio's whole
+data directory, including uploaded images.
 
-At 500 pending images, new capture pauses until uploads make room. A browser request
-whose acknowledgement was lost retries the same capture UUID. Keep the page open until
-it is saved; an image still waiting for the local server lives only in browser memory.
-Local deduplication is by capture UUID; a remote upload interrupted after Roboflow accepted
-it may be retried, relying on Roboflow's duplicate-image handling.
+Queue records survive restarts. Interrupted workers recover after a three-minute
+lease. Network failures, HTTP 408/429 and server errors retry with exponential
+backoff up to five minutes. Authentication/project errors require correcting the
+configuration, restarting Sortie, then choosing **Retry uploads**. Records retain
+their destination; changed destinations are blocked until explicit retry retargets
+the failed records. The queue stops new capture at 500 pending images or when an
+upload requires attention.
 
-Server endpoints: `POST /training/captures` accepts JSON `{id, session, image}` with UUIDs
-and a JPEG data URL; `GET /training/status` returns setup, counts and safe errors;
-`POST /training/retry` retries pending/failed records. Credentials stay on the server.
-The integration follows Roboflow's [official upload implementation](https://github.com/roboflow/roboflow-python/blob/main/roboflow/adapters/rfapi.py):
-image-only multipart upload to `/dataset/{project}/upload`, with a session batch.
+Browser retries reuse the same capture UUID, preventing duplicate local records.
+A connection failure after Label Studio accepted an import can cause a duplicate
+remote task on retry; use the capture UUID in the filename to identify it. An
+import response without one confirmed task ID retains the JPEG and requires
+manual attention before retrying. This adapter targets Community Edition's
+synchronous imports, not Enterprise asynchronous import jobs.
 
-Run the queue/API checks without Roboflow credentials:
+Existing Roboflow queue databases migrate automatically on startup. Unsent images
+move to the configured Label Studio project once configuration is available.
+Completed Roboflow records remain historical records; their images and annotations
+are not imported. Counts include historical uploaded records. Stop any old uploader
+before migration and keep a backup of the entire queue directory.
+
+Server endpoints remain: `POST /training/captures` accepts JSON `{id, session, image}`
+with UUIDs and a JPEG data URL; `GET /training/status` returns setup, counts, a
+browser-accessible `project_url` and safe errors; `POST /training/retry` retries
+pending/failed records.
+
+Run queue/API checks without a real server or credentials:
 
 ```sh
 python -m unittest discover -s tests -p 'test_training.py'
 PLAYWRIGHT_MODULE=/tmp/sortie-browser-check/node_modules/playwright/index.mjs node tests/training-browser.mjs
 ```
 
-The browser checks require a local server at `http://127.0.0.1:5055` (or
-`SORTIE_TEST_URL`), Playwright and Chrome. They mock upload responses and drive a
-controlled fake camera, and set `window.__sortieTestHands` to stand in for the
-hand tracker — a synthetic camera stream cannot contain a real hand. Live upload verification requires your configured Roboflow
-project and key.
+Browser checks require Sortie at `http://127.0.0.1:5055` (or `SORTIE_TEST_URL`),
+Playwright and Chrome. They mock uploads and drive a fake camera with a test hand
+tracker. Protocol tests use the pinned official SDK with a fake HTTP transport,
+including personal-token refresh. Live remote annotation still requires the
+configured host and a second computer.

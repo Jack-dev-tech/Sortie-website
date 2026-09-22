@@ -5,4 +5,6 @@ numpy>=1.24
 # TFLite runtime (Google's LiteRT — the maintained successor to tflite-runtime).
 ai-edge-litert>=1.0
 
-requests>=2.32
+# Pinned: multipart adapter uses the SDK authenticated transport.
+label-studio-sdk==2.1.1
+gunicorn==23.0.0

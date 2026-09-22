@@ -4,7 +4,7 @@ const base = process.env.SORTIE_TEST_URL || 'http://127.0.0.1:5055';
 const browser = await chromium.launch({channel: 'chrome', headless: true,
   args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream']});
 const status = {configured: true, captured: 0, uploaded: 0, pending: 0, failed: 0,
-  capacity: 500, full: false, can_capture: true, project_url: 'https://app.roboflow.com/example/project'};
+  capacity: 500, full: false, can_capture: true, project_url: 'https://sortie.example.ts.net/projects/1/data/'};
 try {
   const page = await browser.newPage({viewport: {width: 1280, height: 900}});
   const errors = [];
@@ -87,6 +87,7 @@ try {
   let captures = await page.evaluate(() => window.calls.filter(c => c.url === '/training/captures'));
   assert.ok(captures.every(c => c.matches && c.mode === 'training'));
   assert.ok(captures.slice(1).every((c, i) => c.at - captures[i].at >= 3000));
+  assert.equal(await page.locator('[data-label-studio]').getAttribute('href'), status.project_url);
   assert.equal(await page.locator('.app').getAttribute('data-state'), 'idle');
   assert.equal(await page.evaluate(() => window.calls.some(c => c.url === '/predict' && c.mode === 'training')), false);
   // One red box, drawn over the fake hand rather than over the whole frame.
@@ -126,8 +127,8 @@ try {
   status.full = true; status.pending = 500; status.can_capture = false;
   await page.waitForFunction(() => document.querySelector('[data-training-status]').textContent.includes('Queue full'));
   before = await count(); await page.waitForTimeout(3400); assert.equal(await count(), before);
-  status.configured = false; status.setup = 'Set ROBOFLOW_API_KEY on server'; status.project_url = null;
-  await page.waitForFunction(() => document.querySelector('[data-training-status]').textContent.includes('ROBOFLOW_API_KEY'));
+  status.configured = false; status.setup = 'Set LABEL_STUDIO_API_KEY on server'; status.project_url = null;
+  await page.waitForFunction(() => document.querySelector('[data-training-status]').textContent.includes('LABEL_STUDIO_API_KEY'));
   assert.equal(await page.locator('[data-training-pause]').isDisabled(), true);
   await page.reload();
   assert.equal(await page.locator('.app').getAttribute('data-mode'), 'normal');

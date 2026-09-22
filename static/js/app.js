@@ -221,7 +221,7 @@ import { HandTracker } from "./hands.mjs";
 
     if (training.active) {
       // Training also waits for the item to move, so someone holding still
-      // doesn't fill Roboflow with near-identical frames.
+      // doesn't fill Label Studio with near-identical frames.
       const itemMoved = regions.some((region) => region.moved);
       training.tick(present && itemMoved, () => captureJPEG(CAPTURE_WIDTH, CAPTURE_QUALITY), true);
       return;

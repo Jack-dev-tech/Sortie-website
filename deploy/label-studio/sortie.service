@@ -1,0 +1,24 @@
+[Unit]
+Description=Sortie capture and inference server
+After=network.target label-studio.service
+
+[Service]
+Type=simple
+User=sortie
+Group=sortie
+WorkingDirectory=/opt/sortie
+EnvironmentFile=/etc/sortie/sortie.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+# One worker owns the upload thread; do not add --preload.
+ExecStart=/opt/sortie/venv/bin/gunicorn --bind 127.0.0.1:5000 --workers 1 --threads 4 --timeout 120 app:app
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/sortie
+
+[Install]
+WantedBy=multi-user.target

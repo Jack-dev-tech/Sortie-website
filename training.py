@@ -1,4 +1,4 @@
-"""Durable, unlabeled Roboflow capture queue. No classifier dependency."""
+"""Durable, unlabeled Label Studio capture queue. No classifier dependency."""
 from contextlib import contextmanager
 import base64
 import binascii
@@ -10,41 +10,46 @@ import re
 import sqlite3
 import threading
 import time
-from urllib.parse import quote
 import uuid
 
 from flask import Blueprint, jsonify, request
 from PIL import Image, UnidentifiedImageError
-import requests
+from labelstudio import LabelStudioUploader, SETUP, UploadError, valid_url
 
 MAX_IMAGES = 500
 MAX_JPEG = 2 * 1024 * 1024
-SETUP = "Set ROBOFLOW_API_KEY, ROBOFLOW_WORKSPACE and ROBOFLOW_PROJECT on the server, then restart."
-
-
-class UploadError(Exception):
-    def __init__(self, message, permanent=False):
-        super().__init__(message)
-        self.permanent = permanent
 
 
 class CaptureQueue:
-    def __init__(self, directory, key="", workspace="", project="", uploader=None):
-        self.key, self.workspace, self.project = key, workspace, project
-        self.configured = bool(key and re.fullmatch(r"[\w-]+", workspace) and re.fullmatch(r"[\w-]+", project))
+    def __init__(self, directory, key="", url="", project="", uploader=None, public_url=""):
+        self.key, self.url, self.project = key, url.rstrip("/"), str(project)
+        self.public_url = (public_url or url).rstrip("/")
+        self.configured = bool(key and valid_url(self.url) and valid_url(self.public_url)
+                               and re.fullmatch(r"[1-9][0-9]*", self.project))
         Path(directory).mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = str(Path(directory) / "captures.sqlite3")
-        self.uploader = uploader or self.upload
+        self.uploader = uploader or LabelStudioUploader(self.url, self.key).upload
         self.wake = threading.Event()
         self.closed = threading.Event()
         with self.connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
+            db.execute("BEGIN IMMEDIATE")
             db.execute("""CREATE TABLE IF NOT EXISTS captures (
                 id TEXT PRIMARY KEY, session TEXT NOT NULL, workspace TEXT NOT NULL,
                 project TEXT NOT NULL, digest TEXT NOT NULL, jpeg BLOB,
                 state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
                 next_attempt REAL NOT NULL DEFAULT 0, lease TEXT, error TEXT,
                 roboflow_id TEXT, created REAL NOT NULL)""")
+            columns = {r["name"] for r in db.execute("PRAGMA table_info(captures)")}
+            for name, kind in (("provider", "TEXT"), ("base_url", "TEXT"), ("task_id", "INTEGER")):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE captures ADD COLUMN {name} {kind}")
+            # Leave completed Roboflow records intact; their JPEGs were already removed.
+            db.execute("UPDATE captures SET provider='roboflow' WHERE provider IS NULL AND state='uploaded'")
+            if self.configured:
+                db.execute("""UPDATE captures SET provider='labelstudio', base_url=?, project=?,
+                    state='pending', next_attempt=0, lease=NULL, error=NULL
+                    WHERE provider IS NULL AND state != 'uploaded'""", (self.url, self.project))
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -70,7 +75,7 @@ class CaptureQueue:
                     can_capture=self.configured and pending < MAX_IMAGES and not failed,
                     error=(error[0] if error else None),
                     setup=None if self.configured else SETUP,
-                    project_url=f"https://app.roboflow.com/{quote(self.workspace)}/{quote(self.project)}" if self.configured else None)
+                    project_url=f"{self.public_url}/projects/{self.project}/data/" if self.configured else None)
 
     def save(self, capture_id, session, jpeg):
         digest = hashlib.sha256(jpeg).hexdigest()
@@ -87,41 +92,10 @@ class CaptureQueue:
                 return {"error": "Queue full (500 images). Capture paused until uploads make room."}, 507
             if db.execute("SELECT 1 FROM captures WHERE state='failed' LIMIT 1").fetchone():
                 return {"error": "Upload needs attention. Resolve the upload error, then retry uploads."}, 503
-            db.execute("INSERT INTO captures (id,session,workspace,project,digest,jpeg,created) VALUES (?,?,?,?,?,?,?)",
-                       (capture_id, session, self.workspace, self.project, digest, jpeg, time.time()))
+            db.execute("INSERT INTO captures (id,session,workspace,project,digest,jpeg,created,provider,base_url) VALUES (?,?,?,?,?,?,?,?,?)",
+                       (capture_id, session, "", self.project, digest, jpeg, time.time(), "labelstudio", self.url))
         self.wake.set()
         return {"id": capture_id, "state": "pending", "duplicate": False}, 201
-
-    def upload(self, row):
-        # Validate the configured workspace/project before uploading. Never return or log
-        # upstream responses/exceptions: either can contain a credential-bearing URL.
-        try:
-            info = requests.get(f"https://api.roboflow.com/{row['workspace']}/{row['project']}",
-                                params={"api_key": self.key}, timeout=(10, 30))
-            self.check_response(info)
-            project = info.json().get("project", {})
-            if project.get("type") != "object-detection":
-                raise UploadError("Use a Roboflow object-detection project; check workspace/project settings and restart, then retry uploads.", True)
-            response = requests.post(f"https://api.roboflow.com/dataset/{row['project']}/upload",
-                params={"api_key": self.key, "batch": f"sortie-{row['session']}"},
-                data={"name": f"{row['id']}.jpg", "split": "train"},
-                files={"file": (f"{row['id']}.jpg", row["jpeg"], "image/jpeg")}, timeout=(10, 45))
-            self.check_response(response)
-            data = response.json()
-            if not (data.get("success") or data.get("duplicate")) or not isinstance(data.get("id"), str) or not data["id"]:
-                raise UploadError("Roboflow did not confirm an image ID. Check project access, then retry uploads.", True)
-            return data["id"]
-        except (requests.RequestException, ValueError):
-            raise UploadError("Roboflow is unreachable or returned an invalid response. Retrying automatically.") from None
-
-    @staticmethod
-    def check_response(response):
-        if response.status_code in (401, 403):
-            raise UploadError("Roboflow authentication failed. Check the server API key and project permissions, restart, then retry uploads.", True)
-        if response.status_code == 429 or response.status_code >= 500 or response.status_code == 408:
-            raise UploadError("Roboflow is temporarily unavailable or rate limited. Retrying automatically.")
-        if not response.ok:
-            raise UploadError("Roboflow rejected the upload. Check workspace/project settings and access, then retry uploads.", True)
 
     def process_one(self):
         if not self.configured:
@@ -135,6 +109,8 @@ class CaptureQueue:
                 return False
             db.execute("UPDATE captures SET state='uploading', lease=?, next_attempt=? WHERE id=?", (lease, now + 180, row["id"]))
         try:
+            if row["base_url"] != self.url or row["project"] != self.project:
+                raise UploadError("The queued Label Studio destination differs from current settings. Retry uploads to use the current project.", True)
             image_id = self.uploader(row)
         except Exception as exc:
             known = isinstance(exc, UploadError)
@@ -146,14 +122,14 @@ class CaptureQueue:
                            ("failed" if permanent else "pending", time.time() + delay, message, row["id"], lease))
         else:
             with self.connect() as db:
-                db.execute("UPDATE captures SET state='uploaded', jpeg=NULL, error=NULL, roboflow_id=?, lease=NULL WHERE id=? AND lease=?", (image_id, row["id"], lease))
+                db.execute("UPDATE captures SET state='uploaded', jpeg=NULL, error=NULL, task_id=?, lease=NULL WHERE id=? AND lease=?", (image_id, row["id"], lease))
         return True
 
     def retry(self):
         with self.connect() as db:
             # Explicit retry applies corrected configuration to rejected records.
-            db.execute("UPDATE captures SET workspace=?, project=? WHERE state='failed'",
-                       (self.workspace, self.project))
+            db.execute("UPDATE captures SET base_url=?, project=?, provider='labelstudio' WHERE state='failed'",
+                       (self.url, self.project))
             db.execute("UPDATE captures SET state='pending', next_attempt=0, error=NULL WHERE state IN ('pending','failed')")
         self.wake.set()
 
@@ -172,7 +148,8 @@ class CaptureQueue:
 
 def install_training(app, queue=None, start_worker=True):
     queue = queue or CaptureQueue(os.environ.get("SORTIE_TRAINING_DIR", str(Path(app.root_path) / "data" / "training")),
-        os.environ.get("ROBOFLOW_API_KEY", ""), os.environ.get("ROBOFLOW_WORKSPACE", ""), os.environ.get("ROBOFLOW_PROJECT", ""))
+        os.environ.get("LABEL_STUDIO_API_KEY", ""), os.environ.get("LABEL_STUDIO_URL", ""),
+        os.environ.get("LABEL_STUDIO_PROJECT_ID", ""), public_url=os.environ.get("LABEL_STUDIO_PUBLIC_URL", ""))
     app.extensions["training_queue"] = queue
     routes = Blueprint("training", __name__)
 

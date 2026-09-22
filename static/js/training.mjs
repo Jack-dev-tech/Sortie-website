@@ -73,7 +73,7 @@ export class TrainingCapture {
     this.pause.disabled = !s?.configured;
     this.retry.hidden = !(s?.error || this.localError);
     this.retry.disabled = !s?.configured;
-    const link = document.querySelector('[data-roboflow]');
+    const link = document.querySelector('[data-label-studio]');
     link.hidden = !s?.project_url;
     if (s?.project_url) link.href = s.project_url;
     for (const key of ['captured', 'uploaded', 'pending']) {
@@ -88,7 +88,7 @@ export class TrainingCapture {
       (this.pending ? 'Saving capture to the local queue…' : null) ||
       s?.error ||
       (s ? 'Watching for a hand holding an item · at most one image every 3 seconds'
-         : 'Checking Roboflow setup…');
+         : 'Checking Label Studio setup…');
   }
 
   // `trigger` is true while a hand is moving an item in view; app.js decides that.
