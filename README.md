@@ -186,3 +186,72 @@ Browser (webcam → privacy blur) ──POST /predict {image}──▶ Flask ─
 | `templates/index.html` | Page markup + bin icons |
 | `static/css/styles.css` | Theme, layout, animations |
 | `static/js/app.js` | Webcam, capture loop, state machine, animations |
+
+## Training mode: collect and label online
+
+Use the bottom-left **Normal / Training** switch to collect images for manual
+bounding-box labeling. Training mode does not classify, recommend bins, auto-label,
+or train/deploy a model. Every reload starts in Normal.
+
+1. In [Roboflow](https://app.roboflow.com), create an **Object Detection** project.
+   Use the four class names **glass**, **paper**, **plastic**, **waste** when labeling.
+2. Get a private API key with access to that project. Set these variables in the
+   server environment (the app does not automatically load `.env` files):
+
+   ```sh
+   export ROBOFLOW_API_KEY='your-private-key'
+   export ROBOFLOW_WORKSPACE='your-workspace-slug'
+   export ROBOFLOW_PROJECT='your-project-slug'
+   python app.py
+   ```
+
+3. Select Training. Once camera privacy processing is ready, movement triggers at
+   most one capture every three seconds. Other movement can trigger captures;
+   stationary items are not repeatedly captured. **Pause capture** stops new captures.
+   Leaving the tab or losing camera/privacy processing also pauses capture.
+4. Choose **Open Roboflow**, find the `sortie-<session UUID>` upload batch, and open
+   its images in Annotate. Draw bounding boxes and assign the four classes manually.
+   Check the first uploaded image is unannotated and can be labeled before collecting
+   a larger session. Roboflow may recognize an existing duplicate image; existing
+   annotations on that image are not removed.
+
+Captures contain the complete processed frame at up to 640 pixels wide, encoded as
+95%-quality JPEG. They preserve the existing people blur and hand handling. Thumbnails
+show the six most recently saved images from this page visit. Counts include all
+captures recorded in this local queue, across sessions; pending includes failed uploads.
+
+The server stores JPEG bytes and queue records atomically in
+`data/training/captures.sqlite3` (ignored by Git). Set `SORTIE_TRAINING_DIR` to choose
+another persistent local directory. Do not place it under `static/`. Successful uploads
+record the Roboflow image ID and clear the JPEG blob; SQLite reuses freed storage.
+Saved captures continue uploading in Normal and resume after server restarts.
+An interrupted upload is eligible for recovery after its three-minute worker lease.
+Network errors, HTTP 429 and server errors retry with exponential backoff, up to five
+minutes. Authentication/project errors require fixing server settings, restarting,
+and choosing **Retry uploads**. Pending records retain their original workspace/project. **Retry uploads** applies
+the current server workspace/project to failed records, allowing you to correct a typo.
+
+At 500 pending images, new capture pauses until uploads make room. A browser request
+whose acknowledgement was lost retries the same capture UUID. Keep the page open until
+it is saved; an image still waiting for the local server lives only in browser memory.
+Local deduplication is by capture UUID; a remote upload interrupted after Roboflow accepted
+it may be retried, relying on Roboflow's duplicate-image handling.
+
+Server endpoints: `POST /training/captures` accepts JSON `{id, session, image}` with UUIDs
+and a JPEG data URL; `GET /training/status` returns setup, counts and safe errors;
+`POST /training/retry` retries pending/failed records. Credentials stay on the server.
+The integration follows Roboflow's [official upload implementation](https://github.com/roboflow/roboflow-python/blob/main/roboflow/adapters/rfapi.py):
+image-only multipart upload to `/dataset/{project}/upload`, with a session batch.
+
+Run the queue/API checks without Roboflow credentials:
+
+```sh
+python -m unittest discover -s tests -p 'test_training.py'
+node --test tests/privacy.test.mjs
+PLAYWRIGHT_MODULE=/tmp/sortie-browser-check/node_modules/playwright/index.mjs node tests/training-browser.mjs
+```
+
+The browser checks require a local server at `http://127.0.0.1:5055` (or
+`SORTIE_TEST_URL`), Playwright and Chrome. They mock upload responses and use controlled
+processed frames; the existing `tests/privacy-browser.mjs` separately checks real privacy
+models. Live upload verification requires your configured Roboflow project and key.

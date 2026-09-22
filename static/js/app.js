@@ -4,6 +4,7 @@
    ========================================================================= */
 
 import { PrivacyCamera } from "./privacy.mjs";
+import { TrainingCapture } from "./training.mjs";
 
 (() => {
   "use strict";
@@ -71,6 +72,9 @@ import { PrivacyCamera } from "./privacy.mjs";
     error: "Camera off",
   };
 
+  const training = new TrainingCapture();
+  let modeGeneration = 0;
+  let confettiRaf = null;
   let state = "loading";
   let stream = null;
   let lastMotionAt = 0;
@@ -99,7 +103,7 @@ import { PrivacyCamera } from "./privacy.mjs";
   function setState(next) {
     state = next;
     app.dataset.state = next;
-    if (next in PROMPTS) promptEl.textContent = PROMPTS[next];
+    if (next in PROMPTS) promptEl.textContent = training.active ? "Collect images for labeling" : PROMPTS[next];
     if (next in STATUS) statusLabel.textContent = STATUS[next];
   }
 
@@ -147,6 +151,8 @@ import { PrivacyCamera } from "./privacy.mjs";
   function stopCamera() {
     cameraSession++;
     privacy.stop();
+    training.ready = false;
+    training.render();
     predictionRequest?.abort();
     predictionRequest = null;
     inFlight = false;
@@ -193,13 +199,19 @@ import { PrivacyCamera } from "./privacy.mjs";
   // ---- Capture loop -----------------------------------------------------
   // The loop watches for motion; the model only runs while something moves.
   function tick() {
-    if (holding || !stream || !privacy.available || document.hidden) return;
+    if (!stream || !privacy.available || document.hidden) return;
+    if (holding && !training.active) return;
 
     const motion = detectMotion();
     if (motion) {
       drawMotionBox(motion.box);
     } else {
       hideMotionBox();
+    }
+
+    if (training.active) {
+      training.tick(Boolean(motion), privateFeed, true);
+      return;
     }
 
     // Only scan while there's movement — a still scene is left alone.
@@ -325,6 +337,8 @@ import { PrivacyCamera } from "./privacy.mjs";
   }
 
   async function sendFrame(dataUrl) {
+    if (training.active) return;
+    const generation = modeGeneration;
     const session = cameraSession;
     const controller = new AbortController();
     predictionRequest = controller;
@@ -338,7 +352,7 @@ import { PrivacyCamera } from "./privacy.mjs";
         signal: controller.signal,
       });
       const data = await res.json();
-      if (session === cameraSession && res.ok && data.category) {
+      if (!training.active && generation === modeGeneration && session === cameraSession && res.ok && data.category) {
         handlePrediction(data);
       }
       // Non-OK responses (bad frame, model not wired) are ignored so the loop
@@ -346,7 +360,7 @@ import { PrivacyCamera } from "./privacy.mjs";
     } catch (_) {
       // network hiccup — skip this frame, try again next tick
     } finally {
-      if (session === cameraSession) {
+      if (generation === modeGeneration && session === cameraSession) {
         inFlight = false;
         predictionRequest = null;
       }
@@ -355,7 +369,7 @@ import { PrivacyCamera } from "./privacy.mjs";
 
   // ---- Stability check --------------------------------------------------
   function handlePrediction({ category, confidence }) {
-    if (holding || !(category in CATEGORIES)) return;
+    if (training.active || holding || !(category in CATEGORIES)) return;
 
     if (confidence < CONFIDENCE_MIN) {
       candidate = null;
@@ -515,7 +529,7 @@ import { PrivacyCamera } from "./privacy.mjs";
         ctx.restore();
       }
       if (alive) {
-        raf = requestAnimationFrame(frame);
+        raf = confettiRaf = requestAnimationFrame(frame);
       } else {
         cancelAnimationFrame(raf);
         ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
@@ -523,6 +537,37 @@ import { PrivacyCamera } from "./privacy.mjs";
     }
     frame();
   }
+
+  function selectMode(active) {
+    if (training.active === active) return;
+    modeGeneration++;
+    predictionRequest?.abort();
+    predictionRequest = null;
+    inFlight = false;
+    clearTimeout(resultTimer);
+    holding = false;
+    candidate = null;
+    prevGray = null;
+    bins.forEach((el) => el.classList.remove("is-match"));
+    document.querySelectorAll(".flyer").forEach((el) => {
+      el.getAnimations().forEach((animation) => animation.cancel());
+      el.remove();
+    });
+    cancelAnimationFrame(confettiRaf);
+    confettiCanvas.getContext("2d").clearRect(0, 0, confettiCanvas.width, confettiCanvas.height);
+    cheerEl.textContent = "";
+    ring.style.strokeDashoffset = String(RING_CIRCUMFERENCE);
+    document.documentElement.style.removeProperty("--accent");
+    app.dataset.mode = active ? "training" : "normal";
+    training.select(active);
+    document.querySelectorAll("button[data-mode]").forEach((button) => {
+      button.setAttribute("aria-pressed", String((button.dataset.mode === "training") === active));
+    });
+    setState(state === "error" ? "error" : privacy.available ? "idle" : "loading");
+  }
+  document.querySelectorAll("button[data-mode]").forEach((button) => {
+    button.addEventListener("click", () => selectMode(button.dataset.mode === "training"));
+  });
 
   // ---- Lifecycle --------------------------------------------------------
   retryBtn.addEventListener("click", startCamera);

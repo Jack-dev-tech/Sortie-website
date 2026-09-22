@@ -13,12 +13,17 @@ const browser = await chromium.launch({
 async function pageWithCamera(photo = fixture) {
   const page = await browser.newPage();
   await page.route("**/__test/person.jpg", (route) => route.fulfill({ contentType: "image/jpeg", body: photo }));
+  await page.route("**/training/status", route => route.fulfill({json: {
+    configured: true, can_capture: true, captured: 0, uploaded: 0, pending: 0, failed: 0,
+  }}));
+  await page.route("**/training/captures", route => route.fulfill({status: 201, json: {id: "saved"}}));
   await page.route("**/predict", (route) => route.fulfill({
     json: { category: "plastic", confidence: 0.95 },
   }));
   await page.addInitScript(() => {
     window.__privacyFrames = 0;
     window.__submissions = [];
+    window.__trainingSubmissions = [];
     window.__workers = [];
     const NativeWorker = window.Worker;
     window.Worker = class extends NativeWorker {
@@ -32,6 +37,10 @@ async function pageWithCamera(photo = fixture) {
     };
     const nativeFetch = window.fetch;
     window.fetch = (url, options) => {
+      if (url === "/training/captures") {
+        window.__trainingSubmissions.push({matchesPreview: JSON.parse(options.body).image ===
+          document.querySelector("[data-private-feed]").toDataURL("image/jpeg", 0.95)});
+      }
       if (url === "/predict") {
         const expected = document.createElement("canvas");
         const preview = document.querySelector("[data-private-feed]");
@@ -122,6 +131,13 @@ try {
   assert.ok(changes.person > 10, JSON.stringify(changes));
   assert.ok(changes.background < 5, JSON.stringify(changes));
   console.log("PASS real models, person blur, clear background, submitted JPEGs, verdict rendering", changes);
+
+  await page.locator('button[data-mode="training"]').click();
+  await page.waitForFunction(() => window.__trainingSubmissions.length > 0, null, {timeout: 45000});
+  assert.equal(await page.evaluate(() => window.__trainingSubmissions.every(s => s.matchesPreview)), true);
+  assert.equal(await page.locator("[data-private-feed]").evaluate(el => el.width), 640);
+  await page.locator('button[data-mode="normal"]').click();
+  console.log("PASS Training uploads match full-resolution real privacy output");
 
   await page.evaluate(() => window.__workers.at(-1).dispatchEvent(
     new MessageEvent("message", { data: { type: "error", message: "Injected failure" } })

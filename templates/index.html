@@ -10,7 +10,7 @@
 />
 <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}" />
 
-<div class="app" data-state="loading">
+<div class="app" data-state="loading" data-mode="normal">
 
   <!-- Ambient blobs that tint to the detected category -->
   <div class="atmosphere" aria-hidden="true">
@@ -148,6 +148,32 @@
       </span>
     </button>
   </section>
+
+  <section class="training-panel" data-training hidden aria-labelledby="training-title">
+    <div class="training-heading">
+      <div><h1 id="training-title">Capture now. Label online.</h1>
+        <p>Draw boxes in Roboflow: glass, paper, plastic, waste.</p></div>
+      <div class="training-actions">
+        <button type="button" data-training-pause aria-pressed="false">Pause capture</button>
+        <a data-roboflow target="_blank" rel="noopener noreferrer" hidden>Open Roboflow ↗</a>
+      </div>
+    </div>
+    <p class="training-status" data-training-status role="status">Checking Roboflow setup…</p>
+    <button type="button" data-training-retry hidden>Retry uploads</button>
+    <dl class="training-counts" aria-label="All locally recorded captures">
+      <div><dt>Captured</dt><dd data-count-captured>—</dd></div>
+      <div><dt>Uploaded</dt><dd data-count-uploaded>—</dd></div>
+      <div><dt>Pending</dt><dd data-count-pending>—</dd></div>
+    </dl>
+    <p class="training-note">Motion triggers captures, including other movement. Stationary items are not repeatedly captured. People stay blurred. Images are sent to Roboflow for manual labeling only.</p>
+    <p class="training-empty" data-training-empty>No captures this visit. Move an item in view to begin.</p>
+    <div class="training-recent" data-training-recent aria-label="Recent captures this visit"></div>
+  </section>
+
+  <div class="mode-switch" role="group" aria-label="Camera mode">
+    <button type="button" data-mode="normal" aria-pressed="true">Normal</button>
+    <button type="button" data-mode="training" aria-pressed="false">Training</button>
+  </div>
 
   <canvas class="confetti" data-confetti aria-hidden="true"></canvas>
 </div>

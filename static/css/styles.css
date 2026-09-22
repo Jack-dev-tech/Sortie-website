@@ -550,3 +550,40 @@ body {
   .lid { transition-duration: 1ms !important; }
   .scanline { display: none; }
 }
+
+/* Training keeps the camera and the existing typography as its anchors. */
+body { overflow: auto; }
+.app { min-height: 100dvh; height: auto; grid-template-rows: auto 1fr auto auto; }
+.mode-switch { display: flex; justify-self: start; padding: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 999px; }
+.mode-switch button, .training-panel button, .training-actions a {
+  font: 600 0.88rem var(--font-body); border: 1px solid var(--line); border-radius: 999px;
+  padding: 11px 18px; min-height: 44px; cursor: pointer; color: var(--ink); background: var(--card); text-decoration: none;
+}
+.mode-switch button { border: 0; background: transparent; }
+.mode-switch button[aria-pressed="true"], .training-actions button { background: var(--ink); color: white; }
+.mode-switch button:focus-visible, .training-panel :is(button,a):focus-visible { outline: 3px solid var(--paper); outline-offset: 3px; }
+.training-panel button:disabled { opacity: 0.5; cursor: default; }
+.training-panel[hidden], .training-panel [hidden] { display: none; }
+.app[data-mode="training"] :is(.bins, .verdict, .bin-arrow, .confetti, .scanline, .reticle, .cheer) { display: none; }
+.training-panel { width: min(100%, 860px); justify-self: center; border-top: 1px solid var(--line); padding-top: 18px; }
+.training-heading, .training-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.training-heading { justify-content: space-between; }
+.training-heading h1 { font: 600 clamp(1.4rem, 3vw, 1.9rem) var(--font-display); margin: 0 0 6px; letter-spacing: -0.02em; }
+.training-heading p, .training-note, .training-empty { color: var(--ink-soft); font-size: 0.85rem; line-height: 1.6; margin: 0; }
+.training-status { font-size: 0.9rem; line-height: 1.5; margin: 16px 0; }
+.training-counts { display: flex; gap: 36px; margin: 16px 0; }
+.training-counts dt { font-size: 0.8rem; color: var(--ink-soft); }
+.training-counts dd { margin: 4px 0 0; font: 600 1.6rem var(--font-display); font-variant-numeric: tabular-nums; }
+.training-empty { margin-top: 14px; }
+.training-recent { display: flex; gap: 8px; margin-top: 12px; overflow-x: auto; }
+.training-recent img { width: 90px; height: 66px; object-fit: contain; background: var(--ink); border-radius: 8px; }
+.app[data-mode="training"] .viewport { flex-shrink: 0; }
+@media (max-width: 560px) {
+  .training-actions { gap: 8px; }
+  .training-panel { padding-top: 14px; }
+  .camera-error { padding: 12px; gap: 6px; }
+  .camera-error-title { font-size: 1.1rem; }
+  .camera-error-msg { font-size: 0.75rem; }
+  .camera-error .retry { font-size: 0.8rem; padding: 8px 16px; }
+}
+.training-panel { min-width: 0; }

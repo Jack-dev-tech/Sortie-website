@@ -1,8 +1,8 @@
 """
 Sortie — local Flask server.
 
-Serves the web UI and a single /predict endpoint that turns a webcam frame
-into a bin recommendation. Run it and open http://localhost:5000.
+Serves the web UI, /predict for bin recommendations, and /training endpoints
+for durable, unlabeled image uploads. Run it and open http://localhost:5000.
 
     python app.py
 """
@@ -15,8 +15,10 @@ from flask import Flask, jsonify, render_template, request
 from PIL import Image, UnidentifiedImageError
 
 import model
+from training import install_training
 
 app = Flask(__name__)
+install_training(app)
 
 
 @app.route("/")
