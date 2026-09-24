@@ -23,6 +23,8 @@ Test a model from the terminal without the webcam:
 """
 
 import io
+import json
+import logging
 import os
 import sys
 import threading
@@ -31,6 +33,7 @@ import zipfile
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 # ---------------------------------------------------------------------------
 # Settings — this is the only block you normally touch.
@@ -65,6 +68,7 @@ LABEL_MAP = {
     "plastic": "plastic",
     "metal": "waste",
     "trash": "waste",
+    "waste": "waste",
 }
 DEFAULT_CATEGORY = "waste"
 
@@ -74,11 +78,55 @@ DEFAULT_CATEGORY = "waste"
 LABELS = None
 
 # Detection models only: ignore boxes scoring below this (0..1).
-SCORE_THRESHOLD = 0.20
+SCORE_THRESHOLD = float(os.environ.get("SORTIE_SCORE_THRESHOLD", "0.20"))
+
+# How sure the UI has to be before it shows a verdict (0..1). Detectors score
+# lower than classifiers, so this sits well below the old classifier-era 0.75.
+# Tune without editing JS:  SORTIE_CONFIDENCE_MIN=0.3 python app.py
+CONFIDENCE_MIN = float(os.environ.get("SORTIE_CONFIDENCE_MIN", "0.45"))
+
+# Log every prediction (and dump the frames it saw) — see README.
+# Turn on with:  SORTIE_DEBUG=1 python app.py
+DEBUG = os.environ.get("SORTIE_DEBUG", "0") == "1"
+
+log = logging.getLogger("sortie")
+if DEBUG and not log.handlers:
+    # Give the logger its own stderr handler: nothing else configures logging, so
+    # without this INFO records fall through to the WARNING-only last-resort
+    # handler and the debug lines never appear.
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(message)s"))
+    log.addHandler(_h)
+    log.setLevel(logging.INFO)
+    log.propagate = False        # don't double-print if something configures root
 
 # Float-input models only: pixel range the model expects. Most Keras/MobileNet
 # exports want (-1, 1); Model Maker / TF Hub exports usually want (0, 1).
 FLOAT_INPUT_RANGE = (0.0, 1.0)
+
+# Resize style. Detectors (YOLO especially) are trained on letterboxed frames —
+# aspect preserved, the leftover padded grey — so squashing a 16:9 webcam frame
+# into a square costs real confidence. None = auto: letterbox everything except
+# plain classifiers. True / False force it.
+LETTERBOX = None
+LETTERBOX_FILL = (114, 114, 114)      # the grey Ultralytics pads with
+
+
+def bin_for(label):
+    """LABEL_MAP lookup that ignores case and stray whitespace.
+
+    Exports capitalise their labels ("Glass", "Metal", ...), so a literal
+    LABEL_MAP.get() would miss every one of them and send the lot to
+    DEFAULT_CATEGORY. Returns None when the label is mapped to None on purpose.
+    """
+    lookup = {str(k).strip().lower(): v for k, v in LABEL_MAP.items()}
+    key = str(label).strip().lower()
+    return lookup[key] if key in lookup else DEFAULT_CATEGORY
+
+
+def in_label_map(label):
+    """True when LABEL_MAP names this label outright (used by describe())."""
+    return str(label).strip().lower() in {str(k).strip().lower() for k in LABEL_MAP}
 
 
 # ---------------------------------------------------------------------------
@@ -144,9 +192,26 @@ def read_labels(model_path):
             for name in z.namelist():
                 if name.lower().endswith(".txt"):
                     return _parse_labels(z.read(name).decode("utf-8"))
+            # Ultralytics (YOLO) exports ship metadata.json with a {"0": "Glass", ...} map.
+            for name in z.namelist():
+                if name.lower().endswith("metadata.json"):
+                    labels = _parse_ultralytics_names(z.read(name))
+                    if labels:
+                        return labels
     except (zipfile.BadZipFile, OSError):
         pass
     return []
+
+
+def _parse_ultralytics_names(blob):
+    """Pull the ordered class list out of an Ultralytics metadata.json blob."""
+    try:
+        names = json.loads(blob.decode("utf-8"))["names"]
+        if isinstance(names, dict):                      # {"0": "Glass", "1": "Metal", ...}
+            return [names[k] for k in sorted(names, key=lambda k: int(k))]
+        return list(names)                               # already a list
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError):
+        return []
 
 
 def _parse_labels(text):
@@ -181,21 +246,35 @@ class TFLiteModel:
 
         self.inp = self.interp.get_input_details()[0]
         self.outputs = self.interp.get_output_details()
-        shape = list(self.inp["shape"])
-        if len(shape) != 4 or shape[-1] != 3:
-            raise ValueError(f"Expected an image input of shape [1, H, W, 3], got {shape}")
-        self.height, self.width = int(shape[1]), int(shape[2])
+        shape = [int(x) for x in self.inp["shape"]]
+        # Keras/TFLite exports are NHWC; Ultralytics (YOLO) exports are NCHW.
+        if len(shape) == 4 and shape[-1] == 3:
+            self.layout = "NHWC"
+            self.height, self.width = shape[1], shape[2]
+        elif len(shape) == 4 and shape[1] == 3:
+            self.layout = "NCHW"
+            self.height, self.width = shape[2], shape[3]
+        else:
+            raise ValueError(
+                f"Expected an image input of shape [1, H, W, 3] or [1, 3, H, W], got {shape}"
+            )
         self.labels = read_labels(self.path)
         self.kind = self._detect_kind()
         if not self.labels:
             n = self._num_classes()
             self.labels = [f"class_{i}" for i in range(n)]
+        self.letterbox = self.kind != "classifier" if LETTERBOX is None else bool(LETTERBOX)
+        # Set per frame by _fit(); _unletterbox() undoes them for the boxes.
+        self._fit_w, self._fit_h = self.width, self.height
+        self._pad_x = self._pad_y = 0
 
     # -- model shape sniffing -------------------------------------------------
     def _detect_kind(self):
         shapes = [tuple(int(x) for x in o["shape"]) for o in self.outputs]
         if len(self.outputs) == 1 and len(shapes[0]) == 2:
             return "classifier"
+        if len(self.outputs) == 1 and len(shapes[0]) == 3 and 4 not in shapes[0][1:]:
+            return "yolo"                     # one fused [1, 4+C, N] (or [1, N, 4+C]) tensor
         if len(self.outputs) == 4 and any(len(s) == 3 and s[-1] == 4 for s in shapes):
             return "detector"                 # TFLite detection postprocess: boxes, classes, scores, count
         if len(self.outputs) == 2 and all(len(s) == 3 for s in shapes) and any(s[-1] == 4 for s in shapes):
@@ -210,11 +289,49 @@ class TFLiteModel:
             return int(self.outputs[0]["shape"][-1])
         if self.kind == "detector-dense":
             return max(int(o["shape"][-1]) for o in self.outputs if int(o["shape"][-1]) != 4) or 0
+        if self.kind == "yolo":
+            d1, d2 = (int(x) for x in self.outputs[0]["shape"][1:])
+            return min(d1, d2) - 4            # the short axis is 4 box rows + one row per class
         return 0
 
     # -- inference ------------------------------------------------------------
+    def _fit(self, image):
+        """Resize to the model's input, letterboxed or squashed.
+
+        Letterboxing keeps the aspect ratio and pads the rest — a 16:9 webcam
+        frame squashed into a square is a 1.78x distortion, which costs a
+        detector real confidence. Records the scale/pad so _unletterbox() can
+        map boxes back onto the original frame.
+        """
+        img = image.convert("RGB")
+        if not self.letterbox:
+            self._fit_w, self._fit_h = self.width, self.height
+            self._pad_x = self._pad_y = 0
+            return img.resize((self.width, self.height))
+
+        w, h = img.size
+        scale = min(self.width / w, self.height / h)
+        new_w, new_h = max(1, round(w * scale)), max(1, round(h * scale))
+        canvas = Image.new("RGB", (self.width, self.height), LETTERBOX_FILL)
+        pad_x, pad_y = (self.width - new_w) // 2, (self.height - new_h) // 2
+        canvas.paste(img.resize((new_w, new_h), Image.BILINEAR), (pad_x, pad_y))
+        self._fit_w, self._fit_h = new_w, new_h
+        self._pad_x, self._pad_y = pad_x, pad_y
+        return canvas
+
+    def _unletterbox(self, x, y):
+        """Padded-canvas coords (0..1) -> original-frame coords (0..1).
+
+        A box may overhang into the padding, so clamp it back onto the frame.
+        """
+        if not self.letterbox:
+            return x, y
+        x = (x * self.width - self._pad_x) / self._fit_w
+        y = (y * self.height - self._pad_y) / self._fit_h
+        return min(max(x, 0.0), 1.0), min(max(y, 0.0), 1.0)
+
     def _preprocess(self, image):
-        img = image.convert("RGB").resize((self.width, self.height))
+        img = self._fit(image)
         arr = np.asarray(img)
         dtype = self.inp["dtype"]
         if dtype == np.float32:
@@ -222,6 +339,8 @@ class TFLiteModel:
             arr = arr.astype(np.float32) / 255.0 * (hi - lo) + lo
         elif dtype == np.int8:
             arr = (arr.astype(np.int16) - 128).astype(np.int8)
+        if self.layout == "NCHW":
+            arr = np.transpose(arr, (2, 0, 1))
         return np.expand_dims(arr.astype(dtype), 0)
 
     def _run(self, image):
@@ -238,6 +357,8 @@ class TFLiteModel:
             return self._raw_classifier(outs[0][0])
         if self.kind == "detector-dense":
             return self._raw_dense(outs)
+        if self.kind == "yolo":
+            return self._raw_yolo(outs)
         return self._raw_detector(outs)
 
     def _raw_classifier(self, scores):
@@ -281,7 +402,7 @@ class TFLiteModel:
             score = float(scores[i])
             idx = int(classes[i])
             label = self.labels[idx] if 0 <= idx < len(self.labels) else f"class_{idx}"
-            dets.append({"label": label, "score": score, "box": [float(v) for v in boxes[i]]})
+            dets.append({"label": label, "score": score, "box": self._fix_box(boxes[i])})
         dets.sort(key=lambda d: d["score"], reverse=True)
         return dets
 
@@ -299,18 +420,55 @@ class TFLiteModel:
         names = self.labels if len(self.labels) == n_cls else [f"class_{i}" for i in range(n_cls)]
         best = scores.argmax(axis=0)                                # best anchor per class
         dets = [{"label": names[c], "score": float(scores[best[c], c]),
-                 "box": [float(v) for v in boxes[best[c]]]} for c in range(n_cls)]
+                 "box": self._fix_box(boxes[best[c]])} for c in range(n_cls)]
         dets.sort(key=lambda d: d["score"], reverse=True)
         return dets
 
+    def _raw_yolo(self, outs):
+        """Ultralytics head: one [1, 4+C, N] tensor of cx,cy,w,h + a score per class.
+
+        Like _raw_dense, we keep the best-scoring anchor per class. predict() only
+        wants the strongest score per bin, so there is nothing for NMS to do.
+        """
+        t = outs[0][0]
+        if t.shape[0] < t.shape[1]:
+            t = t.T                                      # [4+C, N] -> [N, 4+C]
+        boxes, scores = t[:, :4], t[:, 4:]               # v8 heads are already 0..1, no objectness
+        n_cls = scores.shape[-1]
+        names = self.labels if len(self.labels) == n_cls else [f"class_{i}" for i in range(n_cls)]
+        best = scores.argmax(axis=0)                     # best anchor per class
+        dets = [{"label": names[c], "score": float(scores[best[c], c]),
+                 "box": self._xywh_to_box(boxes[best[c]])} for c in range(n_cls)]
+        dets.sort(key=lambda d: d["score"], reverse=True)
+        return dets
+
+    def _fix_box(self, box):
+        """[ymin, xmin, ymax, xmax] off the padded canvas -> the same on the frame."""
+        ymin, xmin, ymax, xmax = (float(v) for v in box)
+        xmin, ymin = self._unletterbox(xmin, ymin)
+        xmax, ymax = self._unletterbox(xmax, ymax)
+        return [ymin, xmin, ymax, xmax]
+
+    def _xywh_to_box(self, xywh):
+        """cx,cy,w,h -> the normalised [ymin, xmin, ymax, xmax] the other heads return."""
+        cx, cy, w, h = (float(v) for v in xywh)
+        if max(cx, cy, w, h) > 1.5:                      # pixel-unit export: scale to 0..1
+            cx, w = cx / self.width, w / self.width
+            cy, h = cy / self.height, h / self.height
+        # Coords are relative to the padded canvas; put them back on the frame.
+        xmin, ymin = self._unletterbox(cx - w / 2, cy - h / 2)
+        xmax, ymax = self._unletterbox(cx + w / 2, cy + h / 2)
+        return [ymin, xmin, ymax, xmax]
+
     def predict(self, image):
         """Collapse raw label scores into one of CATEGORIES."""
+        t0 = time.perf_counter()
         raw = self.raw(image)
         per_cat = {}
         for d in raw:
             if self.kind != "classifier" and d["score"] < SCORE_THRESHOLD:
                 continue
-            cat = LABEL_MAP.get(d["label"], DEFAULT_CATEGORY)
+            cat = bin_for(d["label"])
             if cat is None:
                 continue
             if self.kind == "classifier":
@@ -320,28 +478,51 @@ class TFLiteModel:
         top = [{"label": d["label"], "score": round(d["score"], 3)} for d in
                sorted(raw, key=lambda d: d["score"], reverse=True)[:3]]
         if not per_cat:
-            return {"category": None, "confidence": 0.0, "label": None, "top": top}
-        best = max(per_cat, key=per_cat.get)
-        return {
-            "category": best,
-            "confidence": round(float(min(per_cat[best], 1.0)), 3),
-            "label": top[0]["label"] if top else None,
-            "top": top,
-        }
+            result = {"category": None, "confidence": 0.0, "label": None, "top": top}
+        else:
+            best = max(per_cat, key=per_cat.get)
+            result = {
+                "category": best,
+                "confidence": round(float(min(per_cat[best], 1.0)), 3),
+                "label": top[0]["label"] if top else None,
+                "top": top,
+            }
+        if DEBUG:
+            self._log(result, (time.perf_counter() - t0) * 1000)
+        return result
+
+    def _log(self, result, ms):
+        """One line per prediction, with the raw scores *before* thresholding.
+
+        A category of None still prints how close it got — that is the number
+        you need to pick SCORE_THRESHOLD / CONFIDENCE_MIN.
+        """
+        scores = "  ".join(f"{d['label']}={d['score']:.3f}" for d in result["top"])
+        verdict = (f"{result['category']} {result['confidence']:.2f}"
+                   if result["category"] else "-- no match")
+        gate = "" if not result["category"] else (
+            "" if result["confidence"] >= CONFIDENCE_MIN
+            else f"  [below CONFIDENCE_MIN {CONFIDENCE_MIN}, UI will ignore]")
+        log.info(
+            "predict: %-18s %s  (%.0f ms, thresh %.2f%s)%s",
+            verdict, scores, ms, SCORE_THRESHOLD,
+            ", letterbox" if self.letterbox else "", gate,
+        )
 
     # -- introspection ----------------------------------------------------------
     def describe(self):
         lines = [
             f"Model:   {self.path}",
             f"Kind:    {self.kind}   (loaded in {self.load_seconds:.2f}s)",
-            f"Input:   {[int(x) for x in self.inp['shape']]}  {self.inp['dtype'].__name__}",
+            f"Input:   {[int(x) for x in self.inp['shape']]}  {self.inp['dtype'].__name__}  "
+            f"({self.layout}, {'letterboxed' if self.letterbox else 'squashed'})",
         ]
         for o in self.outputs:
             lines.append(f"Output:  {o['name']}  {[int(x) for x in o['shape']]}  {o['dtype'].__name__}")
         lines.append(f"Labels ({len(self.labels)}):")
         problems = []
         for i, lab in enumerate(self.labels):
-            cat = LABEL_MAP.get(lab)
+            cat = bin_for(lab) if in_label_map(lab) else None
             note = f"-> {cat}" if cat else f"-> (not in LABEL_MAP, falls back to {DEFAULT_CATEGORY})"
             if cat and cat not in CATEGORIES:
                 note += "   !! not one of CATEGORIES"
@@ -350,7 +531,7 @@ class TFLiteModel:
                 problems.append(lab)
             lines.append(f"  {i}: {lab:<24} {note}")
         if self.kind != "classifier":
-            lines.append(f"Score threshold: {SCORE_THRESHOLD}")
+            lines.append(f"Score threshold: {SCORE_THRESHOLD}   UI confidence min: {CONFIDENCE_MIN}")
         lines.append("Mapping check: " + ("OK" if not problems else f"review {problems}"))
         return "\n".join(lines)
 

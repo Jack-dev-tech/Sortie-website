@@ -10,7 +10,7 @@
 />
 <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}" />
 
-<div class="app" data-state="loading" data-mode="normal">
+<div class="app" data-state="loading" data-mode="normal" data-confidence-min="{{ confidence_min }}">
 
   <!-- Ambient blobs that tint to the detected category -->
   <div class="atmosphere" aria-hidden="true">

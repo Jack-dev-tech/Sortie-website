@@ -54,9 +54,10 @@ before hand tracking existed.
 
 Everything model-related lives in **`model.py`**. It works with any `.tflite`
 image model — a classifier (one score per label) or an object detector
-(EfficientDet-style boxes + labels + scores, or raw RetinaNet-style boxes +
-per-class scores). Input size, dtype and the label list are read from the model
-file itself.
+(EfficientDet-style boxes + labels + scores, raw RetinaNet-style boxes +
+per-class scores, or an Ultralytics YOLO head: one fused `[1, 4+C, N]` tensor).
+Input size, dtype, layout (NHWC or YOLO's NCHW) and the label list are all read
+from the model file itself.
 
 **Swapping in a new model — the 3-step loop:**
 
@@ -82,13 +83,43 @@ file itself.
    ```
 
 **Other knobs in `model.py`:** `SCORE_THRESHOLD` (detectors: ignore weak
-boxes), `FLOAT_INPUT_RANGE` (float-input models: `(0, 1)` or `(-1, 1)`),
-`LABELS` (hard-code a label list if the model has none embedded), and
-`SORTIE_MOCK=1` to run with fake predictions while doing UI work.
+boxes, `$SORTIE_SCORE_THRESHOLD`), `CONFIDENCE_MIN` (how sure the UI has to be
+before it shows a verdict, `$SORTIE_CONFIDENCE_MIN` — the server hands it to
+`app.js`, so there is no JS to edit), `LETTERBOX` (`None` = auto: pad detectors
+to a square instead of squashing them, which is what YOLO expects),
+`FLOAT_INPUT_RANGE` (float-input models: `(0, 1)` or `(-1, 1)`), `LABELS`
+(hard-code a label list if the model has none embedded), and `SORTIE_MOCK=1` to
+run with fake predictions while doing UI work.
 
-**Converting a PyTorch checkpoint (mmdet / IceVision RetinaNet):** the current
+**When the UI just sits on "Scanning…":** it means nothing cleared the
+confidence chain — `SCORE_THRESHOLD`, then `CONFIDENCE_MIN` twice in a row
+(`STABLE_FRAMES` in `app.js`). A no-match is silent by design, so turn the
+lights on:
+
+```bash
+SORTIE_DEBUG=1 python app.py
+```
+
+Every prediction then logs its raw scores *before* thresholding, and says so
+when a result was dropped for being under the bar:
+
+```
+predict: plastic 0.15   Plastic=0.155 Waste=0.020 Paper=0.019  (41 ms, thresh 0.05, letterbox)
+                                                   [below CONFIDENCE_MIN 0.45, UI will ignore]
+```
+
+It also keeps the last 200 frames in `data/debug/`, so you can replay exactly
+what the model was shown and try a different bar against it:
+
+```bash
+python model.py data/debug/<file>.jpg
+SORTIE_SCORE_THRESHOLD=0.05 python model.py data/debug/<file>.jpg
+```
+
+**Converting a PyTorch checkpoint (mmdet / IceVision RetinaNet):** an earlier
 `model.tflite` was produced from `garbageclassification.pth` with
-`tools/export_retinanet_tflite.py`. It needs a separate one-off Python 3.11 env
+`tools/export_retinanet_tflite.py` (the current one is an Ultralytics YOLO
+export). It needs a separate one-off Python 3.11 env
 (TFLite conversion tooling is heavy and does not belong in the site's venv):
 
 ```bash
@@ -105,8 +136,10 @@ interesting part to copy is `embed_labels()` and the output layout (boxes
 `[1, N, 4]` + scores `[1, N, C]`), which `model.py` already understands.
 
 **Labels are found in this order:** `LABELS` in `model.py` → `model.labels.txt`
-/ `labels.txt` / `labelmap.txt` next to the model → the list embedded in the
-`.tflite` metadata → `class_0…N`.
+/ `labels.txt` / `labelmap.txt` next to the model → a `labels.txt` embedded in
+the `.tflite` metadata → the `names` map in an embedded `metadata.json`
+(Ultralytics exports) → `class_0…N`. `LABEL_MAP` lookups ignore case, so an
+export that capitalises its labels (`Glass`, `Metal`, …) needs no extra entries.
 
 **The contract** — `classify()` receives a `PIL.Image` (RGB) and returns:
 
@@ -116,8 +149,9 @@ interesting part to copy is `embed_labels()` and the output layout (boxes
 
 `category` ∈ `CATEGORIES` (or `None` when a detector sees nothing) and the UI
 only reads `category` + `confidence`. Note the UI ignores anything under
-`CONFIDENCE_MIN` (0.75 in `static/js/app.js`); detectors usually score lower
-than classifiers, so lower that while testing a detection model.
+`CONFIDENCE_MIN` (0.45, set in `model.py` and passed to the page) — detectors
+score lower than classifiers, which is why it sits well under the 0.75 a
+classifier could carry. `SORTIE_DEBUG=1` shows what the scores actually are.
 
 ## How it fits together
 
@@ -136,8 +170,9 @@ Browser (webcam) ──────────────POST /predict {image}
   the item it holds — raise it for long items, lower it if the box picks up
   background), `MOTION_AREA_MIN_LOCAL` (how much of that region must change to
   call the item "moving", which is what gates training captures),
-  `PREDICT_MIN_GAP` (minimum time between submissions), `CONFIDENCE_MIN` (ignore
-  uncertain guesses), `STABLE_FRAMES` (how many matching frames lock a result),
+  `PREDICT_MIN_GAP` (minimum time between submissions), `FRAME_WIDTH` (width of
+  the frame sent to the model), `STABLE_FRAMES` (how many matching frames lock a
+  result),
   `RESULT_HOLD` (how long the verdict shows). `MOTION_PIXEL_DELTA` and
   `MOTION_AREA_MIN` tune the raw frame-diff and the no-hand fallback.
   `HAND_PAD` (`static/js/hands.mjs`) pads the box around the landmarks.

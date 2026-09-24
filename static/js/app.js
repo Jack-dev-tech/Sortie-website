@@ -12,8 +12,7 @@ import { HandTracker } from "./hands.mjs";
   // ---- Tunables ---------------------------------------------------------
   const TRACK_INTERVAL = 100; // ms between hand/motion checks (the red box follows a hand)
   const PREDICT_MIN_GAP = 1200; // ms — don't fire the model more often than this
-  const FRAME_WIDTH = 320; // downscale width sent over the wire (keeps it light)
-  const CONFIDENCE_MIN = 0.75; // ignore predictions less certain than this
+  const FRAME_WIDTH = 640; // width sent over the wire — the model resizes to 640 anyway
   const STABLE_FRAMES = 2; // same category this many times in a row = locked
   const RESULT_HOLD = 3800; // ms the verdict stays up before scanning resumes
 
@@ -62,6 +61,10 @@ import { HandTracker } from "./hands.mjs";
   const bins = new Map(
     [...document.querySelectorAll("[data-bin]")].map((el) => [el.dataset.bin, el])
   );
+
+  // Ignore predictions less certain than this. The server owns the value so one
+  // env var tunes it:  SORTIE_CONFIDENCE_MIN=0.3 python app.py
+  const CONFIDENCE_MIN = Number(app.dataset.confidenceMin) || 0.45;
 
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const RING_CIRCUMFERENCE = 327;

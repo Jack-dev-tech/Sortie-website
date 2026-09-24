@@ -10,6 +10,8 @@ for durable, unlabeled image uploads. Run it and open http://localhost:5000.
 import base64
 import binascii
 import io
+import time
+from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request
 from PIL import Image, UnidentifiedImageError
@@ -20,10 +22,31 @@ from training import install_training
 app = Flask(__name__)
 install_training(app)
 
+# SORTIE_DEBUG=1 keeps the last DEBUG_KEEP frames the model was asked about, so a
+# disappointing prediction can be replayed offline:  python model.py data/debug/<f>.jpg
+DEBUG_DIR = Path(__file__).with_name("data") / "debug"
+DEBUG_KEEP = 200
+
+
+def _dump_frame(raw):
+    """Save one frame for replay, pruning the oldest so a long session is bounded."""
+    try:
+        DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        (DEBUG_DIR / f"{int(time.time() * 1000)}.jpg").write_bytes(raw)
+        old = sorted(DEBUG_DIR.glob("*.jpg"))[:-DEBUG_KEEP]
+        for path in old:
+            path.unlink(missing_ok=True)
+    except OSError:
+        app.logger.warning("Could not write debug frame", exc_info=True)
+
 
 @app.route("/")
 def index():
-    return render_template("index.html", categories=model.CATEGORIES)
+    return render_template(
+        "index.html",
+        categories=model.CATEGORIES,
+        confidence_min=model.CONFIDENCE_MIN,
+    )
 
 
 @app.route("/predict", methods=["POST"])
@@ -48,6 +71,9 @@ def predict():
         image = Image.open(io.BytesIO(raw)).convert("RGB")
     except (binascii.Error, ValueError, UnidentifiedImageError):
         return jsonify(error="Could not decode image."), 400
+
+    if model.DEBUG:
+        _dump_frame(raw)
 
     try:
         result = model.classify(image)
