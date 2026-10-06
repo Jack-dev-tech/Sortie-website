@@ -123,9 +123,12 @@ body:has(.app[data-mode="training"]) { overflow: auto; }
   background: var(--signal);
   animation: blink 1s steps(2, jump-none) infinite;
 }
+.app[data-state="unsure"] .status-dot { background: var(--zinc); }
+.app[data-state="offline"] .status-dot { background: transparent; box-shadow: inset 0 0 0 2px var(--zinc); }
 .app[data-state="result"] .status-dot { background: var(--accent); box-shadow: 0 0 0 2px var(--zinc); }
 @keyframes blink { 50% { opacity: 0.25; } }
 
+.mode-switch[hidden] { display: none; }
 .mode-switch {
   display: flex;
   border: 2px solid var(--tar);
@@ -199,7 +202,29 @@ body:has(.app[data-mode="training"]) { overflow: auto; }
 .marks span:nth-child(2) { top: 0;    right: 0; border-top-width: 3px;    border-right-width: 3px; }
 .marks span:nth-child(3) { bottom: 0; left: 0;  border-bottom-width: 3px; border-left-width: 3px; }
 .marks span:nth-child(4) { bottom: 0; right: 0; border-bottom-width: 3px; border-right-width: 3px; }
-.app:is([data-state="loading"], [data-state="error"]) .marks { opacity: 0; }
+.app:is([data-state="loading"], [data-state="offline"], [data-state="error"]) .marks { opacity: 0; }
+
+/* What the camera box is doing when it can't show a useful picture */
+.viewport-label {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: none;
+  place-items: center;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: clamp(0.8rem, 1.4vw, 1.1rem);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--zinc);
+  pointer-events: none;
+}
+.app:is([data-state="loading"], [data-state="offline"]) .viewport-label { display: grid; }
+.app[data-state="loading"] .viewport-label { animation: blink 1.4s steps(2, jump-none) infinite; }
+/* Offline: the camera still runs, so veil it rather than black it out */
+.app[data-state="offline"] .viewport-label { background: rgba(21, 24, 25, 0.78); }
+.app[data-state="offline"] .motion-boxes { display: none; }
 
 /* Red boxes drawn around each tracked hand and the item it is holding */
 .motion-boxes {
@@ -231,7 +256,7 @@ body:has(.app[data-mode="training"]) { overflow: auto; }
   opacity: 0;
   pointer-events: none;
 }
-.app[data-state="scanning"] .scanline {
+.app:is([data-state="scanning"], [data-state="unsure"]) .scanline {
   opacity: 0.9;
   animation: sweep 1.6s ease-in-out infinite alternate;
 }
@@ -423,29 +448,45 @@ body:has(.app[data-mode="training"]) { overflow: auto; }
 }
 .app[data-mode="training"] .stage { height: min(60dvh, 640px); }
 .app[data-mode="training"] :is(.bins, .verdict, .scanline) { display: none; }
+/* Training is the operator's tool: the topbar says so */
+.app[data-mode="training"] .topbar { background: var(--tar); color: var(--zinc); }
+.app[data-mode="training"] .mode-switch { border-color: var(--zinc); }
+.app[data-mode="training"] .mode-switch button { color: var(--zinc); }
+.app[data-mode="training"] .mode-switch button[aria-pressed="true"] { background: var(--zinc); color: var(--tar); }
+.app[data-mode="training"] .status { background: transparent; box-shadow: inset 0 0 0 2px var(--zinc); }
 
 .training-panel[hidden], .training-panel [hidden] { display: none; }
 .training-panel {
   grid-row: 3;
   min-width: 0;
-  padding: 24px var(--pad) 40px;
+  padding: clamp(20px, 3vh, 32px) var(--pad) 48px;
   border-top: 2px solid var(--tar);
 }
 .training-panel > * { max-width: 960px; }
-.training-heading, .training-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.training-heading { justify-content: space-between; }
+
+.training-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px 24px; flex-wrap: wrap; }
+.training-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.training-eyebrow,
+.training-subhead,
+.training-counts dt,
+.training-recent time {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--rivet);
+}
 .training-heading h1 {
-  margin: 0 0 6px;
+  margin: 6px 0 4px;
   font-weight: 800;
-  font-size: clamp(1.4rem, 3vw, 2rem);
+  font-size: clamp(1.5rem, 3vw, 2.2rem);
+  line-height: 1.1;
   letter-spacing: -0.02em;
 }
-.training-heading p, .training-note, .training-empty {
-  margin: 0;
-  color: var(--rivet);
-  font-size: 0.9rem;
-  line-height: 1.6;
-}
+.training-eyebrow, .training-heading p:last-child, .training-status-title, .training-empty { margin: 0; }
+.training-heading p:last-child { color: var(--rivet); line-height: 1.5; }
+
 .training-panel button, .training-actions a {
   min-height: 44px;
   padding: 0 18px;
@@ -457,40 +498,84 @@ body:has(.app[data-mode="training"]) { overflow: auto; }
   color: var(--tar);
   font: 800 0.92rem var(--font-body);
   text-decoration: none;
+  white-space: nowrap;
   cursor: pointer;
 }
 .training-actions button { background: var(--tar); color: var(--zinc); }
-.training-panel button:disabled { opacity: 0.45; cursor: default; }
+.training-panel button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* Status plate — monochrome on purpose: bin colours mean bins, red means a hand.
+   stop = needs fixing, wait = will resume by itself, ok = capturing */
 .training-status {
-  margin: 18px 0;
-  padding: 10px 14px;
-  border-left: 4px solid var(--tar);
-  background: rgba(21, 24, 25, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 20px;
+  flex-wrap: wrap;
+  margin: 24px 0;
+  padding: 16px 20px;
+  border: 2px solid var(--tar);
+  border-radius: var(--radius);
+}
+.training-status[data-tone="stop"] { background: var(--tar); color: var(--zinc); }
+.training-status[data-tone="ok"] { border-color: var(--rivet); border-width: 1px; padding: 17px 21px; }
+.training-status-text { min-width: 0; flex: 1 1 32ch; }
+.training-status-title { font-weight: 800; font-size: 1.15rem; line-height: 1.3; }
+.training-status-detail {
+  margin: 4px 0 0;
   font-family: var(--font-mono);
   font-size: 0.85rem;
   line-height: 1.5;
+  overflow-wrap: anywhere;
+  opacity: 0.8;
 }
-.training-counts { display: flex; gap: clamp(20px, 5vw, 48px); margin: 18px 0; }
-.training-counts dt {
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--rivet);
+.training-status[data-tone="stop"] button { border-color: var(--zinc); background: var(--zinc); color: var(--tar); }
+
+/* Counts ledger */
+.training-counts {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  margin: 0 0 32px;
+  border-block: 2px solid var(--tar);
 }
+.training-counts > div { min-width: 0; padding: 12px 16px; }
+.training-counts > div:first-child { padding-left: 0; }
+.training-counts > div + div { border-left: 2px solid var(--tar); }
 .training-counts dd {
   margin: 4px 0 0;
-  font: 600 clamp(1.6rem, 3vw, 2.2rem) var(--font-mono);
+  font: 600 clamp(1.8rem, 4vw, 3rem) / 1 var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
-.training-empty { margin-top: 14px; }
-.training-recent { display: flex; gap: 8px; margin-top: 12px; overflow-x: auto; }
+.training-counts small { font-size: 0.4em; color: var(--rivet); }
+
+/* This visit's captures */
+.training-subhead { margin: 0 0 10px; }
+.training-empty { color: var(--rivet); line-height: 1.5; }
+.training-recent {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.training-recent:empty { display: none; }
+.training-recent li { display: grid; gap: 4px; min-width: 0; }
 .training-recent img {
-  width: 96px;
-  height: 72px;
-  object-fit: contain;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
   background: var(--tar);
   border-radius: var(--radius);
+}
+.training-recent time { font-size: 0.68rem; letter-spacing: 0.08em; }
+.training-note {
+  margin: 32px 0 0;
+  max-width: 64ch;
+  color: var(--rivet);
+  font-size: 0.85rem;
+  line-height: 1.6;
 }
 
 /* ---- Responsive ------------------------------------------------------- */
@@ -517,6 +602,11 @@ body:has(.app[data-mode="training"]) { overflow: auto; }
   .mode-switch button { padding: 0 8px; font-size: 0.7rem; }
   .status-label { font-size: 0.7rem; }
   .bin-hint { display: none; }
+  .training-counts > div { padding: 10px 10px; }
+  .training-counts dt { font-size: 0.62rem; letter-spacing: 0.08em; }
+  .training-counts dd { font-size: 1.5rem; }
+  .training-recent { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .training-actions { width: 100%; }
   .camera-error { padding: 16px; gap: 6px; }
   .camera-error-title { font-size: 1.1rem; }
   .camera-error-msg { font-size: 0.8rem; }
@@ -535,7 +625,8 @@ body:has(.app[data-mode="training"]) { overflow: auto; }
 @media (prefers-reduced-motion: reduce) {
   .status-dot,
   .scanline,
-  .verdict-arrow { animation: none !important; }
+  .verdict-arrow,
+  .viewport-label { animation: none !important; }
   .scanline { display: none; }
   .verdict,
   .app[data-state="result"] .verdict,

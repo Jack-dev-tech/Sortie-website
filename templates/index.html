@@ -15,7 +15,7 @@
   <header class="topbar">
     <span class="brand">Sortie</span>
     <div class="topbar-controls">
-      <div class="mode-switch" role="group" aria-label="Camera mode">
+      <div class="mode-switch" role="group" aria-label="Camera mode" hidden>
         <button type="button" data-mode="normal" aria-pressed="true">Normal</button>
         <button type="button" data-mode="training" aria-pressed="false">Training</button>
       </div>
@@ -32,6 +32,9 @@
 
       <!-- registration marks framing the view -->
       <div class="marks" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+
+      <!-- what the camera box is doing when it has no picture to show -->
+      <p class="viewport-label" data-viewport-label aria-hidden="true"></p>
 
       <!-- scanning sweep -->
       <div class="scanline" aria-hidden="true"></div>
@@ -51,7 +54,7 @@
       <canvas class="grabber" data-grabber hidden></canvas>
     </div>
 
-    <p class="prompt" data-prompt>Hold your item up to the camera</p>
+    <p class="prompt" data-prompt>Starting the camera…</p>
   </main>
 
   <!-- Verdict — the matching bin's colour rises out of it and fills the screen -->
@@ -122,23 +125,37 @@
 
   <section class="training-panel" data-training hidden aria-labelledby="training-title">
     <div class="training-heading">
-      <div><h1 id="training-title">Capture now. Label online.</h1>
-        <p>Draw boxes in Label Studio: glass, paper, plastic, waste.</p></div>
+      <div>
+        <p class="training-eyebrow">Operator · Training</p>
+        <h1 id="training-title">Collecting images for Label Studio</h1>
+        <p>Label each capture there as glass, paper, plastic or waste.</p>
+      </div>
       <div class="training-actions">
-        <button type="button" data-training-pause aria-pressed="false">Pause capture</button>
+        <button type="button" data-training-pause aria-pressed="false" aria-describedby="training-status">Pause capture</button>
         <a data-label-studio target="_blank" rel="noopener noreferrer" hidden>Open Label Studio ↗</a>
       </div>
     </div>
-    <p class="training-status" data-training-status role="status">Checking Label Studio setup…</p>
-    <button type="button" data-training-retry hidden>Retry uploads</button>
+
+    <div class="training-status" id="training-status" data-training-status data-tone="wait" role="status">
+      <div class="training-status-text">
+        <p class="training-status-title" data-status-title>Checking Label Studio…</p>
+        <p class="training-status-detail" data-status-detail hidden></p>
+      </div>
+      <button type="button" data-training-retry hidden>Retry uploads</button>
+    </div>
+
     <dl class="training-counts" aria-label="All locally recorded captures">
       <div><dt>Captured</dt><dd data-count-captured>—</dd></div>
       <div><dt>Uploaded</dt><dd data-count-uploaded>—</dd></div>
-      <div><dt>Pending</dt><dd data-count-pending>—</dd></div>
+      <div><dt>Pending</dt><dd><span data-count-pending>—</span><small data-count-capacity></small></dd></div>
+      <div data-count-failed-cell hidden><dt>Failed</dt><dd data-count-failed>0</dd></div>
     </dl>
-    <p class="training-note">A hand moving an item in view triggers captures. Movement elsewhere in the room, and items held still, are not captured. Images are sent to Label Studio for manual labeling only.</p>
-    <p class="training-empty" data-training-empty>No captures this visit. Hold an item up to the camera to begin.</p>
-    <div class="training-recent" data-training-recent aria-label="Recent captures this visit"></div>
+
+    <h2 class="training-subhead">This visit</h2>
+    <p class="training-empty" data-training-empty>No captures yet. Move an item in front of the camera to start.</p>
+    <ol class="training-recent" data-training-recent aria-label="Recent captures this visit"></ol>
+
+    <p class="training-note">Sortie captures when a hand moves an item in view. It ignores movement elsewhere in the room and items held still. Images go to Label Studio for manual labeling only.</p>
   </section>
 </div>
 

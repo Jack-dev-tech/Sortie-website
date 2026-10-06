@@ -58,7 +58,7 @@ export class TrainingCapture {
       this.statusError = null;
     } catch {
       this.status = null;
-      this.statusError = 'Capture paused: cannot reach the local server. Reconnecting…';
+      this.statusError = 'Reconnecting automatically. Capture is paused until it answers.';
     } finally {
       this.refreshing = false;
       this.render();
@@ -71,24 +71,44 @@ export class TrainingCapture {
     this.pause.textContent = this.paused ? 'Resume capture' : 'Pause capture';
     this.pause.setAttribute('aria-pressed', String(this.paused));
     this.pause.disabled = !s?.configured;
-    this.retry.hidden = !(s?.error || this.localError);
-    this.retry.disabled = !s?.configured;
     const link = document.querySelector('[data-label-studio]');
     link.hidden = !s?.project_url;
     if (s?.project_url) link.href = s.project_url;
-    for (const key of ['captured', 'uploaded', 'pending']) {
+    for (const key of ['captured', 'uploaded', 'pending', 'failed']) {
       document.querySelector(`[data-count-${key}]`).textContent = s ? s[key] : '—';
     }
-    this.message.textContent = this.statusError || s?.setup || this.localError ||
-      (s?.full ? 'Queue full: 500 images waiting. Capture resumes when uploads make room.' : null) ||
-      (s?.failed ? s.error : null) ||
-      (document.hidden ? 'Capture paused while this tab is hidden.' : null) ||
-      (!this.ready ? 'Capture paused until the camera is ready.' : null) ||
-      (this.paused ? 'Capture paused. Saved images continue uploading.' : null) ||
-      (this.pending ? 'Saving capture to the local queue…' : null) ||
-      s?.error ||
-      (s ? 'Watching for a hand holding an item · at most one image every 3 seconds'
-         : 'Checking Label Studio setup…');
+    document.querySelector('[data-count-capacity]').textContent = s?.capacity ? ` / ${s.capacity}` : '';
+    document.querySelector('[data-count-failed-cell]').hidden = !(s?.failed > 0);
+
+    const { tone, title, detail, action } = this.describe();
+    this.message.dataset.tone = tone;
+    this.message.querySelector('[data-status-title]').textContent = title;
+    const detailEl = this.message.querySelector('[data-status-detail]');
+    detailEl.textContent = detail || '';
+    detailEl.hidden = !detail;
+    this.retry.hidden = action !== 'retry';
+    this.retry.disabled = !s?.configured;
+  }
+
+  // The one thing the operator most needs to know right now, most urgent first.
+  // tone: stop = capture can't happen until something is fixed, wait = it will
+  // resume by itself, ok = capturing normally.
+  describe() {
+    const s = this.status;
+    if (this.statusError) return { tone: 'stop', title: "Can't reach the Sortie server", detail: this.statusError };
+    if (s?.setup) return { tone: 'stop', title: "Label Studio isn't connected", detail: s.setup };
+    if (this.localError) return { tone: 'stop', title: 'Capture not saved', detail: this.localError, action: 'retry' };
+    if (s?.full) return { tone: 'wait', title: 'Queue full',
+      detail: `${s.capacity} images waiting. Capture resumes when uploads make room.` };
+    if (s?.failed) return { tone: 'stop', title: 'Uploads stopped', detail: s.error, action: 'retry' };
+    if (document.hidden) return { tone: 'wait', title: 'Paused while this tab is hidden' };
+    if (!this.ready) return { tone: 'wait', title: 'Waiting for the camera' };
+    if (this.paused) return { tone: 'wait', title: 'Capture paused', detail: 'Saved images keep uploading.' };
+    if (this.pending) return { tone: 'ok', title: 'Saving capture…' };
+    if (s?.error) return { tone: 'wait', title: 'Upload retrying', detail: s.error, action: 'retry' };
+    if (s) return { tone: 'ok', title: 'Watching for a hand moving an item',
+      detail: 'At most one image every 3 seconds.' };
+    return { tone: 'wait', title: 'Checking Label Studio…' };
   }
 
   // `trigger` is true while a hand is moving an item in view; app.js decides that.
@@ -123,12 +143,18 @@ export class TrainingCapture {
       }
       this.pending = null;
       this.localError = null;
+      const item = document.createElement('li');
       const img = document.createElement('img');
+      const time = document.createElement('time');
+      const at = new Date(this.lastCapture);
       img.src = capture.image;
       img.alt = 'Capture saved for manual labeling';
+      time.dateTime = at.toISOString();
+      time.textContent = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+      item.append(img, time);
       const recent = document.querySelector('[data-training-recent]');
       document.querySelector('[data-training-empty]').hidden = true;
-      recent.prepend(img);
+      recent.prepend(item);
       while (recent.children.length > 6) recent.lastChild.remove();
     } catch {
       this.localError ||= 'Capture waiting to be saved. Check the local server; retrying automatically. Keep this page open.';

@@ -15,6 +15,9 @@ import { HandTracker } from "./hands.mjs";
   const FRAME_WIDTH = 640; // width sent over the wire — the model resizes to 640 anyway
   const STABLE_FRAMES = 2; // same category this many times in a row = locked
   const RESULT_HOLD = 3800; // ms the verdict stays up before scanning resumes
+  const IDLE_AFTER = 1500; // ms with no hand in frame before the kiosk goes back to idle
+  const UNSURE_AFTER = 3; // unusable predictions in a row before asking the person to adjust
+  const OFFLINE_AFTER = 3; // failed /predict calls in a row before saying sorting is offline
 
   // Motion detection: compare small greyscale snapshots frame-to-frame.
   const MOTION_WIDTH = 64; // downscaled width used for the frame-diff
@@ -54,6 +57,8 @@ import { HandTracker } from "./hands.mjs";
   const errorMsg = document.querySelector("[data-error-msg]");
   const retryBtn = document.querySelector("[data-retry]");
   const motionBoxes = document.querySelector("[data-motion-boxes]");
+  const viewportLabel = document.querySelector("[data-viewport-label]");
+  const statusEl = document.querySelector(".status");
   const bins = new Map(
     [...document.querySelectorAll("[data-bin]")].map((el) => [el.dataset.bin, el])
   );
@@ -62,19 +67,39 @@ import { HandTracker } from "./hands.mjs";
   // env var tunes it:  SORTIE_CONFIDENCE_MIN=0.3 python app.py
   const CONFIDENCE_MIN = Number(app.dataset.confidenceMin) || 0.45;
 
+  // Training is for whoever runs the kiosk, not the public: the mode switch only
+  // appears at /?operator. Every load still starts in Normal.
+  const operator = new URLSearchParams(location.search).has("operator");
+  if (operator) {
+    app.dataset.operator = "";
+    document.querySelector(".mode-switch").hidden = false;
+  }
+
   // ---- State machine ----------------------------------------------------
   const PROMPTS = {
+    loading: "Starting the camera…",
     idle: "Hold your item up to the camera",
     scanning: "Hold it still…",
+    unsure: "Turn it so the label faces the camera",
     result: "",
-    error: "",
+    offline: "Can't sort right now. Use the signs on each bin.",
+    error: "Camera off. Use the signs on each bin.",
   };
+  // Nothing detected at all reads differently from "detected, but not sure".
+  const UNSURE_NOTHING = "Hold it closer to the camera";
   const STATUS = {
     loading: "Starting camera",
     idle: "Ready",
     scanning: "Looking",
+    unsure: "Not sure",
     result: "Sorted",
+    offline: "Sorting offline",
     error: "Camera off",
+  };
+  // Shown inside the camera box when it has no useful picture of its own.
+  const VIEWPORT_LABELS = {
+    loading: "Camera starting",
+    offline: "Sorting offline",
   };
 
   const training = new TrainingCapture();
@@ -86,6 +111,10 @@ import { HandTracker } from "./hands.mjs";
   let inFlight = false;
   let holding = false; // true while a verdict is on screen
   let candidate = null; // { category, count } for the stability check
+  let lowCount = 0; // unusable predictions in a row (too unsure, or nothing seen)
+  let lowReason = null; // "unsure" | "nothing" — what the last unusable one was
+  let failCount = 0; // failed /predict calls in a row
+  let lastPresentAt = 0; // last time a hand (or motion, without tracking) was in frame
   let prevGray = null; // greyscale snapshot of the previous frame, for the diff
   let motionCanvas = null; // small offscreen canvas the diff is computed on
   let lastPredictAt = 0; // timestamp of the last frame handed to the model
@@ -110,8 +139,18 @@ import { HandTracker } from "./hands.mjs";
   function setState(next) {
     state = next;
     app.dataset.state = next;
-    if (next in PROMPTS) promptEl.textContent = training.active ? "Collect images for labeling" : PROMPTS[next];
+    let prompt = PROMPTS[next];
+    if (next === "unsure" && lowReason === "nothing") prompt = UNSURE_NOTHING;
+    if (training.active && next !== "loading" && next !== "error") prompt = "Collect images for labeling";
+    if (next in PROMPTS) promptEl.textContent = prompt;
     if (next in STATUS) statusLabel.textContent = STATUS[next];
+    viewportLabel.textContent = VIEWPORT_LABELS[next] || "";
+  }
+
+  function resetAttempts() {
+    candidate = null;
+    lowCount = 0;
+    lowReason = null;
   }
 
   // ---- Camera -----------------------------------------------------------
@@ -160,8 +199,9 @@ import { HandTracker } from "./hands.mjs";
     inFlight = false;
     clearTimeout(resultTimer);
     holding = false;
-    candidate = null;
-    lastPredictAt = lastMotionAt = 0;
+    resetAttempts();
+    failCount = 0;
+    lastPredictAt = lastMotionAt = lastPresentAt = 0;
     clearVerdict();
     if (stream) stream.getTracks().forEach((t) => t.stop());
     stream = null;
@@ -218,6 +258,15 @@ import { HandTracker } from "./hands.mjs";
     // A verdict is on screen: keep the box tracking the hand, but don't
     // re-classify until it clears.
     if (holding) return;
+
+    // Once the person walks away, drop back to the invitation. Offline stays
+    // up until a prediction actually succeeds.
+    if (present) {
+      lastPresentAt = Date.now();
+    } else if ((state === "scanning" || state === "unsure") && Date.now() - lastPresentAt > IDLE_AFTER) {
+      resetAttempts();
+      setState("idle");
+    }
 
     // An item held perfectly steady still gets classified — only an empty
     // frame stops the model.
@@ -436,14 +485,20 @@ import { HandTracker } from "./hands.mjs";
         body: JSON.stringify({ image: dataUrl }),
         signal: controller.signal,
       });
-      const data = await res.json();
-      if (!training.active && generation === modeGeneration && session === cameraSession && res.ok && data.category) {
+      const data = await res.json().catch(() => ({}));
+      if (training.active || generation !== modeGeneration || session !== cameraSession) return;
+      if (res.ok) {
+        predictionSucceeded();
         handlePrediction(data);
+      } else {
+        // Bad frame, model not wired, model crashed: the server logs the detail.
+        predictionFailed(data.error || `HTTP ${res.status}`);
       }
-      // Non-OK responses (bad frame, model not wired) are ignored so the loop
-      // keeps running; the server logs the detail.
-    } catch (_) {
-      // network hiccup — skip this frame, try again next tick
+    } catch (err) {
+      // Network hiccup, or the server is down. Aborts are deliberate, not failures.
+      if (err.name !== "AbortError" && generation === modeGeneration && session === cameraSession) {
+        predictionFailed(err.message);
+      }
     } finally {
       if (generation === modeGeneration && session === cameraSession) {
         inFlight = false;
@@ -452,14 +507,41 @@ import { HandTracker } from "./hands.mjs";
     }
   }
 
+  // ---- Server health ----------------------------------------------------
+  // A few failures in a row means sorting is down, not one dropped frame. The
+  // loop keeps asking at the normal pace, so it recovers on its own.
+  function predictionFailed(detail) {
+    failCount += 1;
+    // Operators can hover the status pill for the reason; the public never sees it.
+    if (operator) statusEl.title = `Last /predict error: ${detail}`;
+    if (failCount >= OFFLINE_AFTER && !holding && state !== "offline") {
+      resetAttempts();
+      setState("offline");
+    }
+  }
+
+  function predictionSucceeded() {
+    failCount = 0;
+    if (operator) statusEl.title = "Live camera status";
+    if (state === "offline") setState("scanning");
+  }
+
   // ---- Stability check --------------------------------------------------
   function handlePrediction({ category, confidence }) {
-    if (training.active || holding || !(category in CATEGORIES)) return;
+    if (training.active || holding) return;
 
-    if (confidence < CONFIDENCE_MIN) {
+    // Nothing recognised, or not sure enough: after a few in a row, tell the
+    // person what to change instead of looking forever.
+    const usable = category in CATEGORIES && confidence >= CONFIDENCE_MIN;
+    if (!usable) {
       candidate = null;
+      lowCount += 1;
+      lowReason = category ? "unsure" : "nothing";
+      if (lowCount >= UNSURE_AFTER) setState("unsure");
       return;
     }
+    lowCount = 0;
+    if (state === "unsure") setState("scanning");
     if (candidate && candidate.category === category) {
       candidate.count += 1;
     } else {
@@ -475,6 +557,7 @@ import { HandTracker } from "./hands.mjs";
   // The matching plate's colour rises out of its bin (CSS clip-path from --ox).
   function showResult(category, confidence) {
     holding = true;
+    resetAttempts();
     const matchBin = bins.get(category);
     const bin = matchBin.getBoundingClientRect();
     const verdict = verdictEl.getBoundingClientRect();
@@ -514,7 +597,7 @@ import { HandTracker } from "./hands.mjs";
     inFlight = false;
     clearTimeout(resultTimer);
     holding = false;
-    candidate = null;
+    resetAttempts();
     prevGray = null;
     app.dataset.mode = active ? "training" : "normal";
     training.select(active);

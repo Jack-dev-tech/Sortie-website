@@ -78,7 +78,10 @@ try {
       return nativeFetch(url, options);
     };
   });
+  // The public kiosk has no way into Training; operators use /?operator.
   await page.goto(base);
+  assert.equal(await page.locator('.mode-switch').isVisible(), false);
+  await page.goto(`${base}/?operator`);
   await page.waitForFunction(() => window.delayedPrediction);
   await page.locator('button[data-mode="training"]').click();
   await page.evaluate(() => window.delayedPrediction());

@@ -195,9 +195,12 @@ Browser (webcam) ──────────────POST /predict {image}
 
 ## Training mode: collect and label online
 
-Use the top-right **Normal / Training** switch to collect images for manual
+Training is for whoever runs the kiosk, so the public page at `/` has no way
+into it. Open **http://localhost:5000/?operator** to get the top-right
+**Normal / Training** switch, then use it to collect images for manual
 bounding-box labeling. Training mode does not classify, recommend bins, auto-label,
-or train/deploy a model. Every reload starts in Normal.
+or train/deploy a model. Every reload starts in Normal. In operator mode, hovering
+the status pill shows the last `/predict` error.
 
 Use **Label Studio Community Edition** on the same Pi or mini PC as Sortie.
 Connect from another computer through private Tailscale HTTPS access. Follow the
@@ -221,7 +224,7 @@ strings or embedded credentials. The public URL defaults to the API URL for loca
 development; set it explicitly for remote annotation. Variables must be exported;
 the app does not automatically load `.env` files. Credentials stay on the server.
 
-Select **Training**. A hand moving an item triggers at most one capture every
+From `/?operator`, select **Training**. A hand moving an item triggers at most one capture every
 three seconds. **Pause capture**, leaving the tab, or losing the camera stops
 new captures; saved images continue uploading even in Normal mode. Choose
 **Open Label Studio** to draw boxes manually using **glass, paper, plastic, waste**.
@@ -271,7 +274,13 @@ Run queue/API checks without a real server or credentials:
 ```sh
 python -m unittest discover -s tests -p 'test_training.py'
 PLAYWRIGHT_MODULE=/tmp/sortie-browser-check/node_modules/playwright/index.mjs node tests/training-browser.mjs
+PLAYWRIGHT_MODULE=/tmp/sortie-browser-check/node_modules/playwright/index.mjs node tests/kiosk-browser.mjs
 ```
+
+`kiosk-browser.mjs` covers the public screen's states: *not sure* (nothing
+recognised, or below the confidence bar three times running), the return to idle
+when the person leaves, *sorting offline* after three failed `/predict` calls and
+its automatic recovery, and the camera-blocked message.
 
 Browser checks require Sortie at `http://127.0.0.1:5055` (or `SORTIE_TEST_URL`),
 Playwright and Chrome. They mock uploads and drive a fake camera with a test hand
