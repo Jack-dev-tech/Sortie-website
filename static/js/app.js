@@ -32,10 +32,10 @@ import { HandTracker } from "./hands.mjs";
   const CAPTURE_QUALITY = 0.95;
 
   const CATEGORIES = {
-    glass:   { color: "--glass",   cheer: "Glass goes here — thanks!" },
-    paper:   { color: "--paper",   cheer: "Paper, sorted. Nice one!" },
-    plastic: { color: "--plastic", cheer: "Plastic in the recycling — great!" },
-    waste:   { color: "--waste",   cheer: "Landfill it is. Every bit counts." },
+    glass:   { tip: "Rinse it if you can, then drop it in." },
+    paper:   { tip: "Flatten boxes so they fit." },
+    plastic: { tip: "Empty it first, then drop it in." },
+    waste:   { tip: "This one can't be recycled here." },
   };
 
   // ---- Elements ---------------------------------------------------------
@@ -44,19 +44,15 @@ import { HandTracker } from "./hands.mjs";
   const grabber = document.querySelector("[data-grabber]");
   const viewport = document.querySelector("[data-viewport]");
   const verdictEl = document.querySelector("[data-verdict]");
-  const binArrow = document.querySelector("[data-bin-arrow]");
   const promptEl = document.querySelector("[data-prompt]");
   const statusLabel = document.querySelector("[data-status-label]");
   const cheerEl = document.querySelector("[data-cheer]");
   const verdictName = document.querySelector("[data-verdict-name]");
   const verdictConf = document.querySelector("[data-verdict-conf]");
-  const verdictIcon = document.querySelector("[data-verdict-icon]");
-  const ring = document.querySelector("[data-ring]");
   const cameraError = document.querySelector("[data-camera-error]");
   const errorTitle = document.querySelector("[data-error-title]");
   const errorMsg = document.querySelector("[data-error-msg]");
   const retryBtn = document.querySelector("[data-retry]");
-  const confettiCanvas = document.querySelector("[data-confetti]");
   const motionBoxes = document.querySelector("[data-motion-boxes]");
   const bins = new Map(
     [...document.querySelectorAll("[data-bin]")].map((el) => [el.dataset.bin, el])
@@ -66,28 +62,24 @@ import { HandTracker } from "./hands.mjs";
   // env var tunes it:  SORTIE_CONFIDENCE_MIN=0.3 python app.py
   const CONFIDENCE_MIN = Number(app.dataset.confidenceMin) || 0.45;
 
-  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const RING_CIRCUMFERENCE = 327;
-
   // ---- State machine ----------------------------------------------------
   const PROMPTS = {
-    idle: "Show me your item",
-    scanning: "Hold it steady…",
+    idle: "Hold your item up to the camera",
+    scanning: "Hold it still…",
     result: "",
     error: "",
   };
   const STATUS = {
-    loading: "Waking up…",
+    loading: "Starting camera",
     idle: "Ready",
-    scanning: "Scanning…",
-    result: "Sorted!",
+    scanning: "Looking",
+    result: "Sorted",
     error: "Camera off",
   };
 
   const training = new TrainingCapture();
   const handTracker = new HandTracker();
   let modeGeneration = 0;
-  let confettiRaf = null;
   let state = "loading";
   let stream = null;
   let lastMotionAt = 0;
@@ -120,12 +112,6 @@ import { HandTracker } from "./hands.mjs";
     app.dataset.state = next;
     if (next in PROMPTS) promptEl.textContent = training.active ? "Collect images for labeling" : PROMPTS[next];
     if (next in STATUS) statusLabel.textContent = STATUS[next];
-  }
-
-  function accentColor(category) {
-    return getComputedStyle(document.documentElement)
-      .getPropertyValue(CATEGORIES[category].color)
-      .trim();
   }
 
   // ---- Camera -----------------------------------------------------------
@@ -176,8 +162,7 @@ import { HandTracker } from "./hands.mjs";
     holding = false;
     candidate = null;
     lastPredictAt = lastMotionAt = 0;
-    bins.forEach((el) => el.classList.remove("is-match"));
-    cheerEl.textContent = "";
+    clearVerdict();
     if (stream) stream.getTracks().forEach((t) => t.stop());
     stream = null;
     feed.srcObject = null;
@@ -487,155 +472,38 @@ import { HandTracker } from "./hands.mjs";
   }
 
   // ---- Verdict ----------------------------------------------------------
+  // The matching plate's colour rises out of its bin (CSS clip-path from --ox).
   function showResult(category, confidence) {
     holding = true;
-    const color = accentColor(category);
-    document.documentElement.style.setProperty("--accent", color);
+    const matchBin = bins.get(category);
+    const bin = matchBin.getBoundingClientRect();
+    const verdict = verdictEl.getBoundingClientRect();
+    verdictEl.style.setProperty("--ox", `${bin.left + bin.width / 2 - verdict.left}px`);
 
+    app.dataset.category = category;
     verdictName.textContent = category;
     verdictConf.textContent = `${Math.round(confidence * 100)}% sure`;
+    cheerEl.textContent = CATEGORIES[category].tip;
 
-    // clone the matching bin's icon into the verdict + prep the flyer
-    const matchBin = bins.get(category);
-    const iconSvg = matchBin.querySelector(".bin-icon svg");
-    verdictIcon.innerHTML = "";
-    verdictIcon.appendChild(iconSvg.cloneNode(true));
-
-    // confidence ring
-    ring.style.strokeDashoffset = String(
-      RING_CIRCUMFERENCE * (1 - Math.min(Math.max(confidence, 0), 1))
-    );
-
-    cheerEl.textContent = CATEGORIES[category].cheer;
-
-    // highlight the right bin, dim the rest (handled in CSS via data-state)
-    bins.forEach((el) => el.classList.remove("is-match"));
-    matchBin.classList.add("is-match");
-
+    bins.forEach((el) => el.classList.toggle("is-match", el === matchBin));
     setState("result");
-    pointArrowAt(matchBin);
-
-    if (!reduceMotion) {
-      flyToBin(iconSvg, matchBin, color);
-      burstConfetti(color);
-    }
-
     resultTimer = setTimeout(endResult, RESULT_HOLD);
   }
 
   function endResult() {
-    bins.forEach((el) => el.classList.remove("is-match"));
-    ring.style.strokeDashoffset = String(RING_CIRCUMFERENCE);
-    cheerEl.textContent = "";
     holding = false;
     prevGray = null; // re-baseline motion so the resume doesn't self-trigger
     setState(stream ? "scanning" : "error");
+    // Keep the colour and words until the flood has drained back into the bin.
+    resultTimer = setTimeout(() => {
+      if (state !== "result") clearVerdict();
+    }, 450);
   }
 
-  // ---- Arrow pointing at the matching bin -------------------------------
-  function pointArrowAt(matchBin) {
-    const bin = matchBin.getBoundingClientRect();
-    const arrow = binArrow.getBoundingClientRect();
-    binArrow.style.left = `${bin.left + bin.width / 2}px`;
-    binArrow.style.top = `${bin.top - arrow.height - 10}px`;
-  }
-
-  // ---- Flying item icon -------------------------------------------------
-  function flyToBin(iconSvg, matchBin, color) {
-    const start = verdictEl.getBoundingClientRect();
-    const end = matchBin.querySelector(".bin-icon").getBoundingClientRect();
-
-    const flyer = document.createElement("div");
-    flyer.className = "flyer";
-    flyer.style.setProperty("--accent", color);
-    flyer.style.background = color;
-    flyer.appendChild(iconSvg.cloneNode(true));
-
-    const size = 56;
-    const x0 = start.left + start.width / 2 - size / 2;
-    const y0 = start.top + start.height / 2 - size / 2;
-    const x1 = end.left + end.width / 2 - size / 2;
-    const y1 = end.top + end.height / 2 - size / 2;
-
-    flyer.style.left = `${x0}px`;
-    flyer.style.top = `${y0}px`;
-    document.body.appendChild(flyer);
-
-    const arcLift = Math.min(140, Math.abs(y1 - y0) * 0.5 + 60);
-    flyer
-      .animate(
-        [
-          { transform: "translate(0,0) scale(0.6)", opacity: 0 },
-          { transform: "translate(0,0) scale(1)", opacity: 1, offset: 0.15 },
-          {
-            transform: `translate(${(x1 - x0) * 0.5}px, ${-arcLift}px) scale(1.05)`,
-            opacity: 1,
-            offset: 0.55,
-          },
-          { transform: `translate(${x1 - x0}px, ${y1 - y0}px) scale(0.4)`, opacity: 0 },
-        ],
-        { duration: 900, easing: "cubic-bezier(0.4, 0, 0.2, 1)", fill: "forwards" }
-      )
-      .addEventListener("finish", () => flyer.remove());
-  }
-
-  // ---- Confetti ---------------------------------------------------------
-  function burstConfetti(color) {
-    const canvas = confettiCanvas;
-    const ctx = canvas.getContext("2d");
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = window.innerWidth * dpr;
-    canvas.height = window.innerHeight * dpr;
-    ctx.scale(dpr, dpr);
-
-    const palette = [color, "#ffffff", "#0f1613"];
-    const originX = window.innerWidth / 2;
-    const originY = window.innerHeight * 0.42;
-    const pieces = Array.from({ length: 90 }, () => {
-      const angle = Math.random() * Math.PI * 2;
-      const speed = 6 + Math.random() * 9;
-      return {
-        x: originX,
-        y: originY,
-        vx: Math.cos(angle) * speed,
-        vy: Math.sin(angle) * speed - 4,
-        size: 5 + Math.random() * 6,
-        rot: Math.random() * Math.PI,
-        vr: (Math.random() - 0.5) * 0.3,
-        color: palette[(Math.random() * palette.length) | 0],
-        life: 1,
-      };
-    });
-
-    let raf;
-    function frame() {
-      ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
-      let alive = false;
-      for (const p of pieces) {
-        p.vy += 0.35; // gravity
-        p.vx *= 0.99;
-        p.x += p.vx;
-        p.y += p.vy;
-        p.rot += p.vr;
-        p.life -= 0.012;
-        if (p.life <= 0 || p.y > window.innerHeight + 40) continue;
-        alive = true;
-        ctx.save();
-        ctx.globalAlpha = Math.max(p.life, 0);
-        ctx.translate(p.x, p.y);
-        ctx.rotate(p.rot);
-        ctx.fillStyle = p.color;
-        ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size * 0.6);
-        ctx.restore();
-      }
-      if (alive) {
-        raf = confettiRaf = requestAnimationFrame(frame);
-      } else {
-        cancelAnimationFrame(raf);
-        ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
-      }
-    }
-    frame();
+  function clearVerdict() {
+    bins.forEach((el) => el.classList.remove("is-match"));
+    delete app.dataset.category;
+    cheerEl.textContent = "";
   }
 
   function selectMode(active) {
@@ -648,22 +516,13 @@ import { HandTracker } from "./hands.mjs";
     holding = false;
     candidate = null;
     prevGray = null;
-    bins.forEach((el) => el.classList.remove("is-match"));
-    document.querySelectorAll(".flyer").forEach((el) => {
-      el.getAnimations().forEach((animation) => animation.cancel());
-      el.remove();
-    });
-    cancelAnimationFrame(confettiRaf);
-    confettiCanvas.getContext("2d").clearRect(0, 0, confettiCanvas.width, confettiCanvas.height);
-    cheerEl.textContent = "";
-    ring.style.strokeDashoffset = String(RING_CIRCUMFERENCE);
-    document.documentElement.style.removeProperty("--accent");
     app.dataset.mode = active ? "training" : "normal";
     training.select(active);
     document.querySelectorAll("button[data-mode]").forEach((button) => {
       button.setAttribute("aria-pressed", String((button.dataset.mode === "training") === active));
     });
     setState(state === "error" ? "error" : cameraReady ? "idle" : "loading");
+    clearVerdict();
   }
   document.querySelectorAll("button[data-mode]").forEach((button) => {
     button.addEventListener("click", () => selectMode(button.dataset.mode === "training"));

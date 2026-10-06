@@ -160,7 +160,7 @@ Browser (webcam) ──────────────POST /predict {image}
       ▲                                                                    │
       └──────────  {category, confidence}  ◀───────────────────────────────┘
       │
-   state machine: idle → scanning → result  (animates the matching bin)
+   state machine: idle → scanning → result  (the matching bin's colour fills the screen)
 ```
 
 ## Tuning the feel
@@ -177,7 +177,9 @@ Browser (webcam) ──────────────POST /predict {image}
   `MOTION_AREA_MIN` tune the raw frame-diff and the no-hand fallback.
   `HAND_PAD` (`static/js/hands.mjs`) pads the box around the landmarks.
 - **Colors / type** (`static/css/styles.css`, `:root`): the four category colors
-  and fonts.
+  (match them to your physical bins; each has an `--on-<category>` text color),
+  and fonts. The bin plates run left to right in the order of `templates/index.html`,
+  so reorder the `<li>`s to match how the real bins stand.
 
 ## Files
 
@@ -193,7 +195,7 @@ Browser (webcam) ──────────────POST /predict {image}
 
 ## Training mode: collect and label online
 
-Use the bottom-left **Normal / Training** switch to collect images for manual
+Use the top-right **Normal / Training** switch to collect images for manual
 bounding-box labeling. Training mode does not classify, recommend bins, auto-label,
 or train/deploy a model. Every reload starts in Normal.
 
