@@ -34,6 +34,10 @@
   --bins-h: clamp(112px, 20vh, 220px);
   --radius: 4px;
 
+  /* Motion — one set of curves for the whole kiosk */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);       /* entering, exiting, feedback */
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);   /* moving across the screen */
+
   --font-display: "Big Shoulders Stencil", "Arial Narrow", Impact, sans-serif;
   --font-body: "Overpass", "Segoe UI", system-ui, sans-serif;
   --font-mono: "Overpass Mono", ui-monospace, "SF Mono", Menlo, monospace;
@@ -144,6 +148,17 @@ body:has(.app[data-mode="training"]) { overflow: auto; }
 }
 .mode-switch button[aria-pressed="true"] { background: var(--tar); color: var(--zinc); }
 
+/* Press feedback: every button on a touch kiosk confirms the tap */
+.mode-switch button,
+.retry,
+.training-panel button,
+.training-actions a {
+  transition: transform 120ms var(--ease-out);
+}
+:is(.mode-switch button, .retry, .training-panel button, .training-actions a):active:not(:disabled) {
+  transform: scale(0.97);
+}
+
 /* ---- Stage ------------------------------------------------------------ */
 .stage {
   --gap: clamp(20px, 3vw, 56px);
@@ -219,8 +234,12 @@ body:has(.app[data-mode="training"]) { overflow: auto; }
   text-transform: uppercase;
   color: var(--zinc);
   pointer-events: none;
+  transition: opacity 200ms var(--ease-out), display 200ms allow-discrete;
 }
-.app:is([data-state="loading"], [data-state="offline"]) .viewport-label { display: grid; }
+.app:is([data-state="loading"], [data-state="offline"]) .viewport-label {
+  display: grid;
+  @starting-style { opacity: 0; }
+}
 .app[data-state="loading"] .viewport-label { animation: blink 1.4s steps(2, jump-none) infinite; }
 /* Offline: the camera still runs, so veil it rather than black it out */
 .app[data-state="offline"] .viewport-label { background: rgba(21, 24, 25, 0.78); }
@@ -232,37 +251,53 @@ body:has(.app[data-mode="training"]) { overflow: auto; }
   inset: 0;
   pointer-events: none;
   z-index: 4;
+  contain: strict; /* the boxes resize every tick; keep that layout in here */
 }
 
+/* app.js positions each box with transform and sizes it with width/height.
+   Size can't be a scale() without stretching the border. Linear because it
+   is tracking a hand, not arriving anywhere. */
 .motion-box {
   position: absolute;
+  left: 0;
+  top: 0;
   border: 2px solid var(--signal);
   border-radius: 4px;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 0 12px rgba(255, 45, 45, 0.5);
-  transition: left 120ms linear, top 120ms linear,
-    width 120ms linear, height 120ms linear;
+  transition: transform 120ms linear, width 120ms linear, height 120ms linear,
+    opacity 150ms var(--ease-out), display 150ms allow-discrete;
+  @starting-style { opacity: 0; }
 }
-.motion-box[hidden] { display: none; }
+/* Fade rather than blink, which also hides single-frame tracking dropouts */
+.motion-box[hidden] { display: none; opacity: 0; }
 
-/* One thin sweep line while the model is looking */
+/* One thin sweep line while the model is looking. The element covers the
+   viewport so translate's percentage is the viewport's height; the line is
+   its top edge. The sweep only pauses between scans, so the line fades out
+   where it is instead of snapping back to the top. */
 .scanline {
   position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  animation: sweep 1.6s ease-in-out infinite alternate paused;
+  transition: opacity 200ms ease;
+}
+.scanline::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
   height: 2px;
   background: var(--zinc);
   box-shadow: 0 0 14px 2px rgba(226, 229, 224, 0.6);
-  opacity: 0;
-  pointer-events: none;
 }
 .app:is([data-state="scanning"], [data-state="unsure"]) .scanline {
   opacity: 0.9;
-  animation: sweep 1.6s ease-in-out infinite alternate;
+  animation-play-state: running;
 }
 @keyframes sweep {
-  from { top: 0; }
-  to   { top: calc(100% - 2px); }
+  from { translate: 0 0; }
+  to   { translate: 0 calc(100% - 2px); }
 }
 
 /* Camera error panel */
@@ -330,7 +365,7 @@ body:has(.app[data-mode="training"]) { overflow: auto; }
   padding: clamp(12px, 2vh, 24px) clamp(12px, 1.6vw, 28px);
   background: var(--bin);
   color: var(--on-bin);
-  transition: opacity 300ms ease, filter 300ms ease;
+  transition: opacity 250ms ease, filter 250ms ease;
 }
 .bin[data-bin="glass"]   { --bin: var(--glass);   --on-bin: var(--on-glass); }
 .bin[data-bin="paper"]   { --bin: var(--paper);   --on-bin: var(--on-paper); }
@@ -382,11 +417,16 @@ body:has(.app[data-mode="training"]) { overflow: auto; }
   color: var(--on-accent);
   clip-path: circle(0 at var(--ox, 50%) 100%);
   pointer-events: none;
-  transition: clip-path 420ms cubic-bezier(0.5, 0, 0.75, 0);
+  /* Drains back into its bin the way it came. ease-in-out rather than ease-out:
+     the radius is squared into area, so ease-out empties the screen in ~60ms and
+     reads as a cut; this keeps the colour visibly flowing back into the plate. */
+  transition: clip-path 350ms var(--ease-in-out);
 }
+/* --r (set by app.js) is exactly the distance to the farthest corner, so the
+   whole curve is spent on pixels you can see */
 .app[data-state="result"] .verdict {
-  clip-path: circle(150vmax at var(--ox, 50%) 100%);
-  transition: clip-path 640ms cubic-bezier(0.16, 1, 0.3, 1);
+  clip-path: circle(var(--r, 150vmax) at var(--ox, 50%) 100%);
+  transition: clip-path 500ms var(--ease-out);
 }
 .verdict-body {
   display: flex;
@@ -394,6 +434,23 @@ body:has(.app[data-mode="training"]) { overflow: auto; }
   align-items: center;
   text-align: center;
   margin-bottom: clamp(40px, 8vh, 96px);
+}
+/* The words settle in just behind the flood, top to bottom. On the way out
+   they only fade, and drop back down after they're invisible. */
+.verdict-body > * {
+  opacity: 0;
+  translate: 0 12px;
+  transition: opacity 150ms var(--ease-out), translate 0s 150ms;
+}
+.verdict-body > :nth-child(2) { --i: 1; }
+.verdict-body > :nth-child(3) { --i: 2; }
+.verdict-body > :nth-child(4) { --i: 3; }
+.app[data-state="result"] .verdict-body > * {
+  --delay: calc(120ms + var(--i, 0) * 50ms);
+  opacity: var(--o, 1);
+  translate: 0 0;
+  transition: opacity 250ms var(--ease-out) var(--delay),
+    translate 250ms var(--ease-out) var(--delay);
 }
 .verdict-eyebrow,
 .verdict-conf {
@@ -422,7 +479,7 @@ body:has(.app[data-mode="training"]) { overflow: auto; }
 .verdict-conf {
   margin-top: 1.2em;
   font-size: clamp(0.75rem, 1.1vw, 1rem);
-  opacity: 0.75;
+  --o: 0.75; /* resting opacity; the stagger animates up to it */
   font-variant-numeric: tabular-nums;
 }
 .verdict-arrow {
@@ -516,6 +573,7 @@ body:has(.app[data-mode="training"]) { overflow: auto; }
   padding: 16px 20px;
   border: 2px solid var(--tar);
   border-radius: var(--radius);
+  transition: background-color 200ms ease, color 200ms ease, border-color 200ms ease;
 }
 .training-status[data-tone="stop"] { background: var(--tar); color: var(--zinc); }
 .training-status[data-tone="ok"] { border-color: var(--rivet); border-width: 1px; padding: 17px 21px; }
@@ -561,7 +619,14 @@ body:has(.app[data-mode="training"]) { overflow: auto; }
   list-style: none;
 }
 .training-recent:empty { display: none; }
-.training-recent li { display: grid; gap: 4px; min-width: 0; }
+.training-recent li {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  /* A new capture arriving confirms it was saved */
+  transition: opacity 200ms var(--ease-out), transform 200ms var(--ease-out);
+  @starting-style { opacity: 0; transform: scale(0.96); }
+}
 .training-recent img {
   width: 100%;
   aspect-ratio: 4 / 3;
@@ -622,13 +687,25 @@ body:has(.app[data-mode="training"]) { overflow: auto; }
 }
 
 /* ---- Reduced motion --------------------------------------------------- */
+/* Fewer and gentler, not none: keep fades that explain a change, drop movement */
 @media (prefers-reduced-motion: reduce) {
   .status-dot,
   .scanline,
   .verdict-arrow,
   .viewport-label { animation: none !important; }
   .scanline { display: none; }
+  .motion-box { transition: opacity 150ms ease, display 150ms allow-discrete; }
+  .verdict-body > *,
+  .app[data-state="result"] .verdict-body > * { translate: none; }
+  .training-recent li { transition: opacity 200ms ease; }
+  .training-recent li,
+  :is(.mode-switch button, .retry, .training-panel button, .training-actions a):active { transform: none; }
+  /* The verdict crossfades in place instead of flooding out of the bin */
   .verdict,
-  .app[data-state="result"] .verdict,
-  .bin { transition-duration: 1ms !important; }
+  .app[data-state="result"] .verdict {
+    clip-path: none;
+    transition: opacity 200ms ease;
+  }
+  .verdict { opacity: 0; }
+  .app[data-state="result"] .verdict { opacity: 1; }
 }

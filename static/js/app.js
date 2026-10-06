@@ -15,6 +15,7 @@ import { HandTracker } from "./hands.mjs";
   const FRAME_WIDTH = 640; // width sent over the wire — the model resizes to 640 anyway
   const STABLE_FRAMES = 2; // same category this many times in a row = locked
   const RESULT_HOLD = 3800; // ms the verdict stays up before scanning resumes
+  const VERDICT_DRAIN = 400; // ms — the verdict's exit transition (350ms) plus a margin
   const IDLE_AFTER = 1500; // ms with no hand in frame before the kiosk goes back to idle
   const UNSURE_AFTER = 3; // unusable predictions in a row before asking the person to adjust
   const OFFLINE_AFTER = 3; // failed /predict calls in a row before saying sorting is offline
@@ -74,6 +75,8 @@ import { HandTracker } from "./hands.mjs";
     app.dataset.operator = "";
     document.querySelector(".mode-switch").hidden = false;
   }
+
+  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
   // ---- State machine ----------------------------------------------------
   const PROMPTS = {
@@ -142,9 +145,25 @@ import { HandTracker } from "./hands.mjs";
     let prompt = PROMPTS[next];
     if (next === "unsure" && lowReason === "nothing") prompt = UNSURE_NOTHING;
     if (training.active && next !== "loading" && next !== "error") prompt = "Collect images for labeling";
-    if (next in PROMPTS) promptEl.textContent = prompt;
+    if (next in PROMPTS && promptEl.textContent !== prompt) {
+      promptEl.textContent = prompt;
+      revealPrompt();
+    }
     if (next in STATUS) statusLabel.textContent = STATUS[next];
     viewportLabel.textContent = VIEWPORT_LABELS[next] || "";
+  }
+
+  // The prompt is the one line people read; a new instruction should register
+  // as new rather than silently swap. Starting a new animation replaces any
+  // running one, so rapid state changes never queue up.
+  function revealPrompt() {
+    const from = reducedMotion.matches
+      ? { opacity: 0 }
+      : { opacity: 0, transform: "translateY(0.12em)" };
+    promptEl.animate([from, { opacity: 1, transform: "none" }], {
+      duration: 200,
+      easing: "cubic-bezier(0.23, 1, 0.32, 1)", // --ease-out
+    });
   }
 
   function resetAttempts() {
@@ -432,8 +451,7 @@ import { HandTracker } from "./hands.mjs";
       // The feed is mirrored (scaleX(-1)), so flip the box horizontally too.
       const left = cw - (box.x * dw - offX + w);
 
-      el.style.left = `${left}px`;
-      el.style.top = `${top}px`;
+      el.style.transform = `translate(${left}px, ${top}px)`;
       el.style.width = `${w}px`;
       el.style.height = `${h}px`;
       el.hidden = false;
@@ -561,7 +579,12 @@ import { HandTracker } from "./hands.mjs";
     const matchBin = bins.get(category);
     const bin = matchBin.getBoundingClientRect();
     const verdict = verdictEl.getBoundingClientRect();
-    verdictEl.style.setProperty("--ox", `${bin.left + bin.width / 2 - verdict.left}px`);
+    const ox = bin.left + bin.width / 2 - verdict.left;
+    // The flood grows from the bottom edge at ox; the farthest point it has to
+    // reach is whichever top corner is further away.
+    const radius = Math.hypot(Math.max(ox, verdict.width - ox), verdict.height);
+    verdictEl.style.setProperty("--ox", `${ox}px`);
+    verdictEl.style.setProperty("--r", `${Math.ceil(radius)}px`);
 
     app.dataset.category = category;
     verdictName.textContent = category;
@@ -580,7 +603,7 @@ import { HandTracker } from "./hands.mjs";
     // Keep the colour and words until the flood has drained back into the bin.
     resultTimer = setTimeout(() => {
       if (state !== "result") clearVerdict();
-    }, 450);
+    }, VERDICT_DRAIN);
   }
 
   function clearVerdict() {
